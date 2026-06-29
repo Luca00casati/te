@@ -1,0 +1,14 @@
+# Build output
+/te
+/te.exe
+.zig-cache/
+zig-out/
+# Dependencies fetched/extracted by the Zig package manager
+zig-pkg/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Editor leftovers
+*~
+*.swp
