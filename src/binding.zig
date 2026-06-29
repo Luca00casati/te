@@ -34,10 +34,12 @@ pub const Action = enum {
 };
 
 pub const Mod = enum {
-    /// Fires regardless of Ctrl state.
+    /// Fires regardless of modifier state.
     any,
-    /// Requires Ctrl to be held.
+    /// Requires Ctrl held (and not Shift).
     ctrl,
+    /// Requires Ctrl+Shift held.
+    ctrl_shift,
 };
 
 pub const Binding = struct {
@@ -54,25 +56,34 @@ pub const bindings = [_]Binding{
     .{ .key = rl.KEY_KP_ENTER, .action = .newline },
     .{ .key = rl.KEY_TAB, .action = .indent },
     .{ .key = rl.KEY_BACKSPACE, .action = .delete_back },
+    .{ .key = rl.KEY_BACKSPACE, .mod = .ctrl, .action = .delete_forward },
     .{ .key = rl.KEY_DELETE, .action = .delete_forward },
     .{ .key = rl.KEY_LEFT, .action = .move_left },
+    .{ .key = rl.KEY_B, .mod = .ctrl, .action = .move_left },
     .{ .key = rl.KEY_RIGHT, .action = .move_right },
+    .{ .key = rl.KEY_F, .mod = .ctrl, .action = .move_right },
     .{ .key = rl.KEY_UP, .action = .move_up },
+    .{ .key = rl.KEY_P, .mod = .ctrl, .action = .move_up },
     .{ .key = rl.KEY_DOWN, .action = .move_down },
+    .{ .key = rl.KEY_N, .mod = .ctrl, .action = .move_down },
     .{ .key = rl.KEY_HOME, .action = .move_home },
+    .{ .key = rl.KEY_A, .mod = .ctrl_shift, .action = .move_home },
     .{ .key = rl.KEY_END, .action = .move_end },
+    .{ .key = rl.KEY_E, .mod = .ctrl_shift , .action = .move_end },
     .{ .key = rl.KEY_PAGE_UP, .action = .page_up },
+    .{ .key = rl.KEY_J, .mod = .ctrl, .action = .page_up },
     .{ .key = rl.KEY_PAGE_DOWN, .action = .page_down },
+    .{ .key = rl.KEY_J, .mod = .ctrl_shift, .action = .page_down },
     // shortcuts
-    .{ .key = rl.KEY_A, .action = .select_all, .mod = .ctrl, .repeat = false },
+    //.{ .key = rl.KEY_A, .action = .select_all, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_Z, .action = .undo, .mod = .ctrl },
-    .{ .key = rl.KEY_Y, .action = .redo, .mod = .ctrl },
+    .{ .key = rl.KEY_Z, .action = .redo, .mod = .ctrl_shift },
     .{ .key = rl.KEY_C, .action = .copy, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_X, .action = .cut, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_V, .action = .paste, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_S, .action = .save, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_W, .action = .save_as, .mod = .ctrl, .repeat = false },
     .{ .key = rl.KEY_O, .action = .open, .mod = .ctrl, .repeat = false },
-    .{ .key = rl.KEY_F, .action = .find, .mod = .ctrl, .repeat = false },
+    .{ .key = rl.KEY_S, .action = .find, .mod = .ctrl_shift, .repeat = false },
     .{ .key = rl.KEY_Q, .action = .quit, .mod = .ctrl, .repeat = false },
 };

@@ -34,6 +34,9 @@ var top_line: usize = 0;
 var left_col: usize = 0;
 var page_lines: usize = 1;
 var shift: bool = false;
+// True only while a plain (Shift+navigation) move is extending the selection;
+// false for chorded moves like Ctrl+Shift+L, which should just move.
+var sel_extend: bool = false;
 var blink_base: f64 = 0;
 var quit_requested: bool = false;
 var running: bool = true;
@@ -497,7 +500,7 @@ fn handleMinibuffer(ctrl: bool) void {
 
 // --- action dispatch -------------------------------------------------------
 fn afterMove() void {
-    if (!shift) anchor = cursor;
+    if (!sel_extend) anchor = cursor;
     noteActivity();
 }
 fn applyAction(action: binding.Action) void {
@@ -740,6 +743,11 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn handleInput(ctrl: bool, m: Metrics) void {
+    // Esc clears the selection (the minibuffer, when open, handles Esc itself).
+    if (rl.IsKeyPressed(rl.KEY_ESCAPE)) {
+        anchor = cursor;
+        noteActivity();
+    }
     if (!ctrl) {
         var cp = rl.GetCharPressed();
         while (cp > 0) : (cp = rl.GetCharPressed()) {
@@ -751,11 +759,17 @@ fn handleInput(ctrl: bool, m: Metrics) void {
     for (binding.bindings) |b| {
         const mod_ok = switch (b.mod) {
             .any => true,
-            .ctrl => ctrl,
+            .ctrl => ctrl and !shift,
+            .ctrl_shift => ctrl and shift,
         };
         if (!mod_ok) continue;
         const hit = if (b.repeat) pressed(b.key) else rl.IsKeyPressed(b.key);
-        if (hit) applyAction(b.action);
+        if (hit) {
+            // Shift extends the selection only on plain navigation keys, not
+            // when it's part of a chord (e.g. Ctrl+Shift+L just moves).
+            sel_extend = shift and b.mod == .any;
+            applyAction(b.action);
+        }
     }
     const wheel = rl.GetMouseWheelMove();
     if (wheel != 0) {
