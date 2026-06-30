@@ -370,20 +370,6 @@ fn cursorLineCol() struct { line: usize, col: usize } {
 fn visRows(line_len: usize, cols: usize) usize {
     return @max(1, (line_len + cols - 1) / cols);
 }
-// Sum of visual rows of logical lines [from, to).
-fn rowsBetween(from: usize, to: usize, cols: usize) usize {
-    if (to <= from) return 0;
-    var r: usize = 0;
-    var l = from;
-    var s = lineStartOfRow(from);
-    while (l < to and s <= len) : (l += 1) {
-        const e = lineEnd(s);
-        r += visRows(e - s, cols);
-        if (e >= len) break;
-        s = e + 1;
-    }
-    return r;
-}
 
 // --- clipboard -------------------------------------------------------------
 fn copySelection() void {
@@ -786,11 +772,24 @@ pub fn main(init: std.process.Init) void {
             if (wrap) {
                 left_col = 0;
                 if (cp.line < top_line) top_line = cp.line;
-                // advance top until the caret's visual row fits on screen
-                var used = rowsBetween(top_line, cp.line, visible_cols) + cp.col / visible_cols;
+                // Visual rows from top_line down to the caret's own row. Walk the
+                // lines once, then scroll down a line at a time (reusing the byte
+                // offset) until the caret fits — no repeated scans from the start.
+                var s = lineStartOfRow(top_line);
+                var used: usize = cp.col / visible_cols;
+                {
+                    var ss = s;
+                    var l = top_line;
+                    while (l < cp.line) : (l += 1) {
+                        const e = lineEnd(ss);
+                        used += visRows(e - ss, visible_cols);
+                        ss = e + 1;
+                    }
+                }
                 while (used >= visible and top_line < cp.line) {
-                    const ss = lineStartOfRow(top_line);
-                    used -= visRows(lineEnd(ss) - ss, visible_cols);
+                    const e = lineEnd(s);
+                    used -= visRows(e - s, visible_cols);
+                    s = e + 1;
                     top_line += 1;
                 }
             } else {
@@ -815,7 +814,10 @@ pub fn main(init: std.process.Init) void {
 
         if (wrap) {
             // Walk logical lines from top_line, laying each out across one or
-            // more visual rows of `visible_cols` columns.
+            // more visual rows of `visible_cols` columns. The caret position is
+            // captured during this walk so we don't rescan the buffer for it.
+            const caret_seg = cp.col / visible_cols;
+            var caret_y: f32 = -1;
             var row: usize = 0;
             var li: usize = top_line;
             var s: usize = lineStartOfRow(top_line);
@@ -828,6 +830,7 @@ pub fn main(init: std.process.Init) void {
                     const y = margin_y + @as(f32, @floatFromInt(row)) * line_h;
                     const seg_s = s + seg * visible_cols;
                     const seg_e = @min(e, seg_s + visible_cols);
+                    if (li == cp.line and seg == caret_seg) caret_y = y;
 
                     if (sel_b > sel_a) {
                         const a = std.math.clamp(sel_a, seg_s, seg_e);
@@ -858,13 +861,9 @@ pub fn main(init: std.process.Init) void {
                 s = e + 1;
             }
 
-            if (show_caret and cp.line >= top_line) {
-                const crow = rowsBetween(top_line, cp.line, visible_cols) + cp.col / visible_cols;
-                if (crow < visible) {
-                    const cx = text_x0 + @as(f32, @floatFromInt(cp.col % visible_cols)) * char_w;
-                    const cy = margin_y + @as(f32, @floatFromInt(crow)) * line_h;
-                    rl.DrawRectangleV(.{ .x = cx, .y = cy }, .{ .x = 2, .y = line_h }, cfg.colors.cursor);
-                }
+            if (show_caret and caret_y >= 0) {
+                const cx = text_x0 + @as(f32, @floatFromInt(cp.col % visible_cols)) * char_w;
+                rl.DrawRectangleV(.{ .x = cx, .y = caret_y }, .{ .x = 2, .y = line_h }, cfg.colors.cursor);
             }
         } else {
             var li: usize = 0;
