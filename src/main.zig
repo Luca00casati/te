@@ -269,6 +269,20 @@ fn moveRight() void {
     cursor += 1;
     while (cursor < len and isCont(text[cursor])) cursor += 1;
 }
+/// Word constituent: ASCII alnum/underscore, or any non-ASCII byte (so
+/// multi-byte letters count as part of a word).
+fn isWordChar(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or
+        (b >= '0' and b <= '9') or b == '_' or b >= 0x80;
+}
+fn moveWordRight() void {
+    while (cursor < len and !isWordChar(text[cursor])) cursor += 1;
+    while (cursor < len and isWordChar(text[cursor])) cursor += 1;
+}
+fn moveWordLeft() void {
+    while (cursor > 0 and !isWordChar(text[cursor - 1])) cursor -= 1;
+    while (cursor > 0 and isWordChar(text[cursor - 1])) cursor -= 1;
+}
 fn lineStart(pos: usize) usize {
     var i = pos;
     while (i > 0 and text[i - 1] != '\n') i -= 1;
@@ -482,6 +496,34 @@ fn mbBackspace() void {
     mb_len -= n;
     mb_cursor = start;
 }
+/// Tab completion for the command prompt: fill in the longest common prefix
+/// of the matching command names (the full name when only one matches).
+fn mbComplete() void {
+    if (mb_intent != .command) return;
+    const prefix = mb_input[0..mb_len];
+    var matches: usize = 0;
+    var lcp: []const u8 = "";
+    for (binding.commands) |c| {
+        if (!std.mem.startsWith(u8, c.name, prefix)) continue;
+        if (matches == 0) {
+            lcp = c.name;
+        } else {
+            var i: usize = 0;
+            const m = @min(lcp.len, c.name.len);
+            while (i < m and lcp[i] == c.name[i]) i += 1;
+            lcp = lcp[0..i];
+        }
+        matches += 1;
+    }
+    if (matches == 0) {
+        echo("No match");
+        return;
+    }
+    const m = @min(lcp.len, mb_input.len);
+    @memcpy(mb_input[0..m], lcp[0..m]);
+    mb_len = m;
+    mb_cursor = m;
+}
 fn mbConfirm() void {
     const input = mb_input[0..mb_len];
     switch (mb_intent) {
@@ -552,6 +594,10 @@ fn handleMinibuffer(ctrl: bool) void {
         mbConfirm();
         return;
     }
+    if (rl.IsKeyPressed(rl.KEY_TAB)) {
+        mbComplete();
+        return;
+    }
     if (!ctrl) {
         var cp = rl.GetCharPressed();
         while (cp > 0) : (cp = rl.GetCharPressed()) {
@@ -611,6 +657,14 @@ fn applyAction(action: binding.Action) void {
         },
         .move_end => {
             moveEnd();
+            afterMove();
+        },
+        .move_word_left => {
+            moveWordLeft();
+            afterMove();
+        },
+        .move_word_right => {
+            moveWordRight();
             afterMove();
         },
         .page_up => {
@@ -1068,6 +1122,25 @@ fn drawMinibuffer(font: rl.Font, char_w: f32, y: f32, tmp: []u8) void {
         // minibuffer caret (solid)
         const cx = x0 + @as(f32, @floatFromInt(mb_cursor)) * char_w;
         rl.DrawRectangleV(.{ .x = cx, .y = y + 2 }, .{ .x = 2, .y = cfg.font.size }, cfg.colors.cursor);
+        // command prompt: dim list of matching completions (Tab to fill in)
+        if (mb_intent == .command) {
+            var hint: [256]u8 = undefined;
+            var hl: usize = 0;
+            for (binding.commands) |c| {
+                if (!std.mem.startsWith(u8, c.name, mb_input[0..mb_len])) continue;
+                if (hl != 0 and hl < hint.len) {
+                    hint[hl] = ' ';
+                    hl += 1;
+                }
+                const take = @min(c.name.len, hint.len - 1 - hl);
+                @memcpy(hint[hl .. hl + take], c.name[0..take]);
+                hl += take;
+                if (hl >= hint.len - 1) break;
+            }
+            hint[hl] = 0;
+            const hx = x0 + @as(f32, @floatFromInt(mb_len)) * char_w + 2 * char_w;
+            rl.DrawTextEx(font, &hint, .{ .x = hx, .y = y + 2 }, fs, sp, cfg.colors.gutter);
+        }
     }
 }
 
