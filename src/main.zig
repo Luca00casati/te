@@ -32,7 +32,15 @@ var has_file: bool = false; // false until associated with a real path
 // View / interaction state.
 var top_line: usize = 0;
 var left_col: usize = 0;
+// Soft wrap: long logical lines continue on the next visual row instead of
+// running off the right edge. When on, horizontal scrolling (left_col) is off.
+var wrap: bool = true;
 var page_lines: usize = 1;
+// Visible text columns, refreshed each frame; used for wrap-aware vertical moves.
+var view_cols: usize = 1;
+// Sticky/goal column for vertical movement: the on-screen column a run of
+// up/down moves tries to keep. null = not set; any horizontal motion clears it.
+var goal_col: ?usize = null;
 var shift: bool = false;
 // True only while a plain (Shift+navigation) move is extending the selection;
 // false for chorded moves like Ctrl+Shift+L, which should just move.
@@ -46,7 +54,11 @@ var running: bool = true;
 // into, a single-key question, or a transient echo-area message.
 // ---------------------------------------------------------------------------
 const MbKind = enum { none, text_prompt, char_query };
-const MbIntent = enum { none, find_file, write_file, search, quit };
+const MbIntent = enum { none, find_file, write_file, search, quit, command };
+
+// True after the prefix key (Ctrl-T) until the next key resolves it: a chord
+// fires a shortcut directly, a printable key opens the command-name prompt.
+var prefix_pending: bool = false;
 
 var mb_kind: MbKind = .none;
 var mb_intent: MbIntent = .none;
@@ -269,8 +281,10 @@ fn moveEnd() void {
     cursor = lineEnd(cursor);
 }
 fn moveVertical(delta: i32) void {
+    if (wrap) return moveVisual(delta);
     const ls = lineStart(cursor);
-    const col = cursor - ls;
+    const col = goal_col orelse (cursor - ls);
+    goal_col = col;
     if (delta < 0) {
         if (ls == 0) return;
         const prev_start = lineStart(ls - 1);
@@ -282,6 +296,40 @@ fn moveVertical(delta: i32) void {
         const next_start = le + 1;
         const next_len = lineEnd(next_start) - next_start;
         cursor = next_start + @min(col, next_len);
+    }
+}
+// Move one visual (wrapped) row, keeping the same on-screen column. Within a
+// long logical line this steps between its segments; at a segment edge it
+// crosses to the adjacent logical line's nearest row.
+fn moveVisual(delta: i32) void {
+    const cols = @max(@as(usize, 1), view_cols);
+    const ls = lineStart(cursor);
+    const col = cursor - ls;
+    const sub = col / cols; // which visual row within this logical line
+    goal_col = goal_col orelse (col % cols);
+    const vcol = @min(goal_col.?, cols - 1); // on-screen column to preserve
+    if (delta < 0) {
+        if (sub > 0) {
+            cursor = ls + (sub - 1) * cols + vcol;
+        } else {
+            if (ls == 0) return;
+            const prev_start = lineStart(ls - 1);
+            const prev_len = ls - 1 - prev_start;
+            const last_sub = visRows(prev_len, cols) - 1;
+            cursor = prev_start + @min(last_sub * cols + vcol, prev_len);
+        }
+    } else {
+        const le = lineEnd(cursor);
+        const llen = le - ls;
+        const last_sub = visRows(llen, cols) - 1;
+        if (sub < last_sub) {
+            cursor = ls + @min((sub + 1) * cols + vcol, llen);
+        } else {
+            if (le >= len) return;
+            const next_start = le + 1;
+            const next_len = lineEnd(next_start) - next_start;
+            cursor = next_start + @min(vcol, next_len);
+        }
     }
 }
 fn lineCount() usize {
@@ -310,6 +358,26 @@ fn cursorLineCol() struct { line: usize, col: usize } {
         } else col += 1;
     }
     return .{ .line = line, .col = col };
+}
+// --- soft wrap -------------------------------------------------------------
+// Number of visual rows a logical line of `line_len` bytes occupies at `cols`
+// columns (>= 1, so an empty line still takes one row).
+fn visRows(line_len: usize, cols: usize) usize {
+    return @max(1, (line_len + cols - 1) / cols);
+}
+// Sum of visual rows of logical lines [from, to).
+fn rowsBetween(from: usize, to: usize, cols: usize) usize {
+    if (to <= from) return 0;
+    var r: usize = 0;
+    var l = from;
+    var s = lineStartOfRow(from);
+    while (l < to and s <= len) : (l += 1) {
+        const e = lineEnd(s);
+        r += visRows(e - s, cols);
+        if (e >= len) break;
+        s = e + 1;
+    }
+    return r;
 }
 
 // --- clipboard -------------------------------------------------------------
@@ -378,6 +446,7 @@ fn searchNext(query: []const u8) void {
     if (hit) |idx| {
         anchor = idx;
         cursor = idx + query.len;
+        goal_col = null;
         noteActivity();
         echoFmt("Found: {s}", .{query});
     } else {
@@ -440,6 +509,21 @@ fn mbConfirm() void {
                 last_search_len = n;
             }
             if (last_search_len > 0) searchNext(last_search[0..last_search_len]);
+        },
+        .command => {
+            // Resolve the name before mbClose() so an action that opens its own
+            // prompt (e.g. save -> "Write file:") isn't immediately closed.
+            const name = std.mem.trim(u8, input, " ");
+            var matched: ?binding.Action = null;
+            for (binding.commands) |c| {
+                if (std.mem.eql(u8, c.name, name)) {
+                    matched = c.action;
+                    break;
+                }
+            }
+            mbClose();
+            if (matched) |a| applyAction(a) else echoFmt("No command: {s}", .{name});
+            return;
         },
         else => {},
     }
@@ -504,6 +588,11 @@ fn afterMove() void {
     noteActivity();
 }
 fn applyAction(action: binding.Action) void {
+    // Only vertical moves preserve the sticky column; everything else drops it.
+    switch (action) {
+        .move_up, .move_down, .page_up, .page_down => {},
+        else => goal_col = null,
+    }
     switch (action) {
         .newline => insertBytes("\n"),
         .indent => insertBytes(cfg.layout.tab),
@@ -560,6 +649,11 @@ fn applyAction(action: binding.Action) void {
         .save_as => mbStartPrompt(.write_file, "Write file: ", filename),
         .open => mbStartPrompt(.find_file, "Find file: ", ""),
         .find => mbStartPrompt(.search, "Search: ", ""),
+        .toggle_wrap => {
+            wrap = !wrap;
+            left_col = 0;
+            echo(if (wrap) "Wrap on" else "Wrap off");
+        },
         .quit => quit_requested = true,
     }
 }
@@ -581,15 +675,34 @@ fn offsetFromMouse(m: Metrics) usize {
     const mp = rl.GetMousePosition();
     var rf = (mp.y - cfg.layout.margin_y) / m.line_h;
     if (rf < 0) rf = 0;
+    var cf = (mp.x - m.text_x0) / m.char_w + 0.5;
+    if (cf < 0) cf = 0;
+    const click_col = @as(usize, @intFromFloat(cf));
+    if (wrap) {
+        // Find the logical line + segment under the clicked visual row.
+        const target = @as(usize, @intFromFloat(rf));
+        var vrow: usize = 0;
+        var s = lineStartOfRow(top_line);
+        while (true) {
+            const e = lineEnd(s);
+            const segs = visRows(e - s, m.visible_cols);
+            if (target < vrow + segs) {
+                const seg = target - vrow;
+                const seg_s = s + seg * m.visible_cols;
+                const seg_e = @min(e, seg_s + m.visible_cols);
+                return @min(seg_s + click_col, seg_e);
+            }
+            vrow += segs;
+            if (e >= len) return e;
+            s = e + 1;
+        }
+    }
     const row = top_line + @as(usize, @intFromFloat(rf));
     const lc = lineCount();
     const rrow = if (row >= lc) lc - 1 else row;
     const start = lineStartOfRow(rrow);
     const llen = lineEnd(start) - start;
-    var cf = (mp.x - m.text_x0) / m.char_w + 0.5;
-    if (cf < 0) cf = 0;
-    const col = left_col + @as(usize, @intFromFloat(cf));
-    return start + @min(col, llen);
+    return start + @min(left_col + click_col, llen);
 }
 
 pub fn main(init: std.process.Init) void {
@@ -645,11 +758,14 @@ pub fn main(init: std.process.Init) void {
         const visible = @max(@as(usize, 1), floorToUsize((win_h - margin_y - 2 * line_h) / line_h));
         const visible_cols = @max(@as(usize, 1), floorToUsize((win_w - text_x0) / char_w));
         page_lines = visible;
+        view_cols = visible_cols;
         const metrics = Metrics{ .char_w = char_w, .line_h = line_h, .text_x0 = text_x0, .visible = visible, .visible_cols = visible_cols };
 
         // ---- input ----
         if (mb_kind != .none) {
             handleMinibuffer(ctrl);
+        } else if (prefix_pending) {
+            handlePrefix(ctrl);
         } else {
             handleInput(ctrl, metrics);
             if (rl.WindowShouldClose() or quit_requested) {
@@ -660,10 +776,22 @@ pub fn main(init: std.process.Init) void {
         // ---- scroll: follow caret only when it actually moved ----
         if (cursor != prev_cursor) {
             const cp = cursorLineCol();
-            if (cp.line < top_line) top_line = cp.line;
-            if (cp.line >= top_line + visible) top_line = cp.line - visible + 1;
-            if (cp.col < left_col) left_col = cp.col;
-            if (cp.col >= left_col + visible_cols) left_col = cp.col - visible_cols + 1;
+            if (wrap) {
+                left_col = 0;
+                if (cp.line < top_line) top_line = cp.line;
+                // advance top until the caret's visual row fits on screen
+                var used = rowsBetween(top_line, cp.line, visible_cols) + cp.col / visible_cols;
+                while (used >= visible and top_line < cp.line) {
+                    const ss = lineStartOfRow(top_line);
+                    used -= visRows(lineEnd(ss) - ss, visible_cols);
+                    top_line += 1;
+                }
+            } else {
+                if (cp.line < top_line) top_line = cp.line;
+                if (cp.line >= top_line + visible) top_line = cp.line - visible + 1;
+                if (cp.col < left_col) left_col = cp.col;
+                if (cp.col >= left_col + visible_cols) left_col = cp.col - visible_cols + 1;
+            }
             prev_cursor = cursor;
         }
 
@@ -673,54 +801,110 @@ pub fn main(init: std.process.Init) void {
 
         const sel_a = selMin();
         const sel_b = selMax();
-        var li: usize = 0;
-        var s: usize = 0;
-        while (true) {
-            const e = lineEnd(s);
-            if (li >= top_line and li < top_line + visible) {
-                const row = li - top_line;
-                const y = margin_y + @as(f32, @floatFromInt(row)) * line_h;
+        const cp = cursorLineCol();
+        const blink_on = !cfg.cursor_blink or
+            @mod(rl.GetTime() - blink_base, cfg.cursor_blink_period * 2) < cfg.cursor_blink_period;
+        const show_caret = mb_kind == .none and blink_on;
 
-                if (sel_b > sel_a) {
-                    const a = std.math.clamp(sel_a, s, e);
-                    const b = std.math.clamp(sel_b, s, e);
-                    if (b > a) {
-                        const ca = (a - s) -| left_col;
-                        const cb = (b - s) -| left_col;
-                        if (cb > ca) rl.DrawRectangle(
-                            @intFromFloat(text_x0 + @as(f32, @floatFromInt(ca)) * char_w),
+        if (wrap) {
+            // Walk logical lines from top_line, laying each out across one or
+            // more visual rows of `visible_cols` columns.
+            var row: usize = 0;
+            var li: usize = top_line;
+            var s: usize = lineStartOfRow(top_line);
+            outer: while (row < visible) {
+                const e = lineEnd(s);
+                const segs = visRows(e - s, visible_cols);
+                var seg: usize = 0;
+                while (seg < segs) : (seg += 1) {
+                    if (row >= visible) break :outer;
+                    const y = margin_y + @as(f32, @floatFromInt(row)) * line_h;
+                    const seg_s = s + seg * visible_cols;
+                    const seg_e = @min(e, seg_s + visible_cols);
+
+                    if (sel_b > sel_a) {
+                        const a = std.math.clamp(sel_a, seg_s, seg_e);
+                        const b = std.math.clamp(sel_b, seg_s, seg_e);
+                        if (b > a) rl.DrawRectangle(
+                            @intFromFloat(text_x0 + @as(f32, @floatFromInt(a - seg_s)) * char_w),
                             @intFromFloat(y),
-                            @intFromFloat(@as(f32, @floatFromInt(cb - ca)) * char_w),
+                            @intFromFloat(@as(f32, @floatFromInt(b - a)) * char_w),
                             @intFromFloat(line_h),
                             cfg.colors.selection,
                         );
                     }
+
+                    if (seg == 0) {
+                        const num = std.fmt.bufPrintSentinel(&num_tmp, "{d}", .{li + 1}, 0) catch "";
+                        const nx = margin_x + @as(f32, @floatFromInt(digits - num.len)) * char_w;
+                        rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
+                    }
+
+                    const draw_len = @min(seg_e - seg_s, line_tmp.len - 1);
+                    @memcpy(line_tmp[0..draw_len], text[seg_s .. seg_s + draw_len]);
+                    line_tmp[draw_len] = 0;
+                    rl.DrawTextEx(font, &line_tmp, .{ .x = text_x0, .y = y }, font_size, spacing, cfg.colors.fg);
+                    row += 1;
                 }
-
-                const num = std.fmt.bufPrintSentinel(&num_tmp, "{d}", .{li + 1}, 0) catch "";
-                const nx = margin_x + @as(f32, @floatFromInt(digits - num.len)) * char_w;
-                rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
-
-                const vis_start = s + @min(left_col, e - s);
-                const draw_len = @min(e - vis_start, line_tmp.len - 1);
-                @memcpy(line_tmp[0..draw_len], text[vis_start .. vis_start + draw_len]);
-                line_tmp[draw_len] = 0;
-                rl.DrawTextEx(font, &line_tmp, .{ .x = text_x0, .y = y }, font_size, spacing, cfg.colors.fg);
+                li += 1;
+                if (e >= len) break;
+                s = e + 1;
             }
-            li += 1;
-            if (e >= len) break;
-            s = e + 1;
-        }
 
-        // caret (blinking; hidden while the minibuffer has focus)
-        const cp = cursorLineCol();
-        const blink_on = !cfg.cursor_blink or
-            @mod(rl.GetTime() - blink_base, cfg.cursor_blink_period * 2) < cfg.cursor_blink_period;
-        if (mb_kind == .none and blink_on and cp.line >= top_line and cp.line < top_line + visible and cp.col >= left_col) {
-            const row = cp.line - top_line;
-            const cx = text_x0 + @as(f32, @floatFromInt(cp.col - left_col)) * char_w;
-            const cy = margin_y + @as(f32, @floatFromInt(row)) * line_h;
-            rl.DrawRectangleV(.{ .x = cx, .y = cy }, .{ .x = 2, .y = line_h }, cfg.colors.cursor);
+            if (show_caret and cp.line >= top_line) {
+                const crow = rowsBetween(top_line, cp.line, visible_cols) + cp.col / visible_cols;
+                if (crow < visible) {
+                    const cx = text_x0 + @as(f32, @floatFromInt(cp.col % visible_cols)) * char_w;
+                    const cy = margin_y + @as(f32, @floatFromInt(crow)) * line_h;
+                    rl.DrawRectangleV(.{ .x = cx, .y = cy }, .{ .x = 2, .y = line_h }, cfg.colors.cursor);
+                }
+            }
+        } else {
+            var li: usize = 0;
+            var s: usize = 0;
+            while (true) {
+                const e = lineEnd(s);
+                if (li >= top_line and li < top_line + visible) {
+                    const row = li - top_line;
+                    const y = margin_y + @as(f32, @floatFromInt(row)) * line_h;
+
+                    if (sel_b > sel_a) {
+                        const a = std.math.clamp(sel_a, s, e);
+                        const b = std.math.clamp(sel_b, s, e);
+                        if (b > a) {
+                            const ca = (a - s) -| left_col;
+                            const cb = (b - s) -| left_col;
+                            if (cb > ca) rl.DrawRectangle(
+                                @intFromFloat(text_x0 + @as(f32, @floatFromInt(ca)) * char_w),
+                                @intFromFloat(y),
+                                @intFromFloat(@as(f32, @floatFromInt(cb - ca)) * char_w),
+                                @intFromFloat(line_h),
+                                cfg.colors.selection,
+                            );
+                        }
+                    }
+
+                    const num = std.fmt.bufPrintSentinel(&num_tmp, "{d}", .{li + 1}, 0) catch "";
+                    const nx = margin_x + @as(f32, @floatFromInt(digits - num.len)) * char_w;
+                    rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
+
+                    const vis_start = s + @min(left_col, e - s);
+                    const draw_len = @min(e - vis_start, line_tmp.len - 1);
+                    @memcpy(line_tmp[0..draw_len], text[vis_start .. vis_start + draw_len]);
+                    line_tmp[draw_len] = 0;
+                    rl.DrawTextEx(font, &line_tmp, .{ .x = text_x0, .y = y }, font_size, spacing, cfg.colors.fg);
+                }
+                li += 1;
+                if (e >= len) break;
+                s = e + 1;
+            }
+
+            if (show_caret and cp.line >= top_line and cp.line < top_line + visible and cp.col >= left_col) {
+                const row = cp.line - top_line;
+                const cx = text_x0 + @as(f32, @floatFromInt(cp.col - left_col)) * char_w;
+                const cy = margin_y + @as(f32, @floatFromInt(row)) * line_h;
+                rl.DrawRectangleV(.{ .x = cx, .y = cy }, .{ .x = 2, .y = line_h }, cfg.colors.cursor);
+            }
         }
 
         // status (mode) line
@@ -753,8 +937,17 @@ fn handleInput(ctrl: bool, m: Metrics) void {
         while (cp > 0) : (cp = rl.GetCharPressed()) {
             var enc: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(@intCast(cp), &enc) catch 0;
-            if (n > 0) insertBytes(enc[0..n]);
+            if (n > 0) {
+                insertBytes(enc[0..n]);
+                goal_col = null;
+            }
         }
+    }
+    // Emacs prefix: Ctrl-T arms the leader; handlePrefix takes over next frame.
+    if (ctrl and !shift and rl.IsKeyPressed(binding.prefix_key)) {
+        prefix_pending = true;
+        noteActivity();
+        return;
     }
     for (binding.bindings) |b| {
         const mod_ok = switch (b.mod) {
@@ -773,7 +966,8 @@ fn handleInput(ctrl: bool, m: Metrics) void {
     }
     const wheel = rl.GetMouseWheelMove();
     if (wheel != 0) {
-        const max_top = if (lineCount() > m.visible) lineCount() - m.visible else 0;
+        // With wrap, lines vary in height, so just stop at the last line.
+        const max_top = if (wrap) lineCount() - 1 else if (lineCount() > m.visible) lineCount() - m.visible else 0;
         var nt: i64 = @as(i64, @intCast(top_line)) - @as(i64, @intFromFloat(wheel)) * cfg.scroll_speed;
         nt = std.math.clamp(nt, 0, @as(i64, @intCast(max_top)));
         top_line = @intCast(nt);
@@ -781,10 +975,48 @@ fn handleInput(ctrl: bool, m: Metrics) void {
     if (rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
         cursor = offsetFromMouse(m);
         if (!shift) anchor = cursor;
+        goal_col = null;
         noteActivity();
     } else if (rl.IsMouseButtonDown(rl.MOUSE_BUTTON_LEFT)) {
         cursor = offsetFromMouse(m);
+        goal_col = null;
         noteActivity();
+    }
+}
+
+// Prefix is armed: resolve the next key. Esc/C-g cancels; C-t t opens the
+// named-command prompt; otherwise a chord fires a shortcut directly. Chords
+// match with Ctrl optional (C-t s == C-t C-s); Shift selects shifted variants.
+fn handlePrefix(ctrl: bool) void {
+    if (rl.IsKeyPressed(rl.KEY_ESCAPE) or (ctrl and rl.IsKeyPressed(rl.KEY_G))) {
+        prefix_pending = false;
+        echo("Quit");
+        return;
+    }
+    // typed-command entry: C-t t (or C-t C-t) -> "Command:" prompt
+    if (!shift and rl.IsKeyPressed(binding.prefix_key)) {
+        prefix_pending = false;
+        mbStartPrompt(.command, "Command: ", "");
+        return;
+    }
+    // chord path: C-t <key>, with or without Ctrl
+    for (binding.prefix_bindings) |b| {
+        const mod_ok = switch (b.mod) {
+            .any => true,
+            .ctrl => !shift, // Ctrl optional
+            .ctrl_shift => shift,
+        };
+        if (!mod_ok) continue;
+        if (rl.IsKeyPressed(b.key)) {
+            prefix_pending = false;
+            applyAction(b.action);
+            return;
+        }
+    }
+    // any other printable key is an undefined chord: cancel
+    if (rl.GetCharPressed() > 0) {
+        prefix_pending = false;
+        echo("Quit");
     }
 }
 
@@ -792,6 +1024,10 @@ fn drawMinibuffer(font: rl.Font, char_w: f32, y: f32, tmp: []u8) void {
     const fs = cfg.font.size;
     const sp = cfg.font.spacing;
     if (mb_kind == .none) {
+        if (prefix_pending) {
+            rl.DrawTextEx(font, "C-t-", .{ .x = cfg.layout.margin_x, .y = y + 2 }, fs, sp, cfg.colors.fg);
+            return;
+        }
         // echo area
         if (echo_len > 0 and rl.GetTime() - echo_time < 4.0) {
             const n = @min(echo_len, tmp.len - 1);
