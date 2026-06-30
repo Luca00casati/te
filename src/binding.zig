@@ -81,10 +81,10 @@ pub const commands = [_]Command{
 /// Chords reachable after the prefix (e.g. C-t C-s -> save). The second key
 /// carries its own modifier, so these are matched while the prefix is pending.
 pub const prefix_bindings = [_]Binding{
-    .{ .key = rl.KEY_S, .mod = .ctrl, .action = .save },
-    .{ .key = rl.KEY_W, .mod = .ctrl, .action = .save_as },
-    .{ .key = rl.KEY_O, .mod = .ctrl, .action = .open },
-    .{ .key = rl.KEY_A, .mod = .ctrl, .action = .select_all },
+    .{ .key = rl.KEY_S, .action = .save },
+    .{ .key = rl.KEY_W, .action = .save_as },
+    .{ .key = rl.KEY_O, .action = .open },
+    .{ .key = rl.KEY_A, .action = .select_all },
 };
 
 pub const bindings = [_]Binding{

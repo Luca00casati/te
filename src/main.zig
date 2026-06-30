@@ -60,6 +60,11 @@ const MbIntent = enum { none, find_file, write_file, search, quit, command };
 // fires a shortcut directly, a printable key opens the command-name prompt.
 var prefix_pending: bool = false;
 
+// Help overlay: C-h lists the direct keybindings, C-t h lists the named
+// commands. While shown it covers the editor and any key/click closes it.
+const HelpKind = enum { none, nav, commands };
+var help: HelpKind = .none;
+
 var mb_kind: MbKind = .none;
 var mb_intent: MbIntent = .none;
 var mb_prompt: [:0]const u8 = "";
@@ -762,7 +767,9 @@ pub fn main(init: std.process.Init) void {
         const metrics = Metrics{ .char_w = char_w, .line_h = line_h, .text_x0 = text_x0, .visible = visible, .visible_cols = visible_cols };
 
         // ---- input ----
-        if (mb_kind != .none) {
+        if (help != .none) {
+            if (rl.GetKeyPressed() != 0 or rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) help = .none;
+        } else if (mb_kind != .none) {
             handleMinibuffer(ctrl);
         } else if (prefix_pending) {
             handlePrefix(ctrl);
@@ -920,6 +927,8 @@ pub fn main(init: std.process.Init) void {
 
         drawMinibuffer(font, char_w, mb_y, &line_tmp);
 
+        if (help != .none) drawHelp(font, line_h, win_w, win_h, &line_tmp);
+
         rl.EndDrawing();
     }
 
@@ -942,6 +951,11 @@ fn handleInput(ctrl: bool, m: Metrics) void {
                 goal_col = null;
             }
         }
+    }
+    // C-h opens the keybindings help overlay.
+    if (ctrl and !shift and rl.IsKeyPressed(rl.KEY_H)) {
+        help = .nav;
+        return;
     }
     // Emacs prefix: Ctrl-T arms the leader; handlePrefix takes over next frame.
     if (ctrl and !shift and rl.IsKeyPressed(binding.prefix_key)) {
@@ -991,6 +1005,12 @@ fn handlePrefix(ctrl: bool) void {
     if (rl.IsKeyPressed(rl.KEY_ESCAPE) or (ctrl and rl.IsKeyPressed(rl.KEY_G))) {
         prefix_pending = false;
         echo("Quit");
+        return;
+    }
+    // C-t h -> commands help overlay
+    if (rl.IsKeyPressed(rl.KEY_H)) {
+        prefix_pending = false;
+        help = .commands;
         return;
     }
     // typed-command entry: C-t t (or C-t C-t) -> "Command:" prompt
@@ -1050,6 +1070,149 @@ fn drawMinibuffer(font: rl.Font, char_w: f32, y: f32, tmp: []u8) void {
         const cx = x0 + @as(f32, @floatFromInt(mb_cursor)) * char_w;
         rl.DrawRectangleV(.{ .x = cx, .y = y + 2 }, .{ .x = 2, .y = cfg.font.size }, cfg.colors.cursor);
     }
+}
+
+// --- help overlay ----------------------------------------------------------
+fn modPrefix(mod: binding.Mod) []const u8 {
+    return switch (mod) {
+        .any => "",
+        .ctrl => "C-",
+        .ctrl_shift => "C-S-",
+    };
+}
+fn keyLabel(key: c_int) []const u8 {
+    return switch (key) {
+        rl.KEY_LEFT => "Left",
+        rl.KEY_RIGHT => "Right",
+        rl.KEY_UP => "Up",
+        rl.KEY_DOWN => "Down",
+        rl.KEY_HOME => "Home",
+        rl.KEY_END => "End",
+        rl.KEY_PAGE_UP => "PgUp",
+        rl.KEY_PAGE_DOWN => "PgDn",
+        rl.KEY_ENTER => "Enter",
+        rl.KEY_KP_ENTER => "KpEnter",
+        rl.KEY_TAB => "Tab",
+        rl.KEY_BACKSPACE => "Backspace",
+        rl.KEY_DELETE => "Delete",
+        rl.KEY_SPACE => "Space",
+        else => "",
+    };
+}
+/// Human-readable chord like "C-S-Left" or "B" into `buf`.
+fn comboName(buf: []u8, b: binding.Binding) []const u8 {
+    var n: usize = 0;
+    const pfx = modPrefix(b.mod);
+    @memcpy(buf[n .. n + pfx.len], pfx);
+    n += pfx.len;
+    const named = keyLabel(b.key);
+    if (named.len > 0) {
+        @memcpy(buf[n .. n + named.len], named);
+        n += named.len;
+    } else if (b.key >= 'A' and b.key <= 'Z') {
+        buf[n] = @intCast(b.key);
+        n += 1;
+    } else {
+        buf[n] = '?';
+        n += 1;
+    }
+    return buf[0..n];
+}
+/// Enum tag with underscores turned to spaces, e.g. "move left".
+fn actionLabel(buf: []u8, action: binding.Action) []const u8 {
+    const name = @tagName(action);
+    for (name, 0..) |c, i| buf[i] = if (c == '_') ' ' else c;
+    return buf[0..name.len];
+}
+// Upper bound on Action variants; used to size the dedup bitset for help rows.
+const action_slots = 64;
+
+/// Distinct actions across the direct keybindings (one help row each).
+fn navRowCount() usize {
+    var shown = std.mem.zeroes([action_slots]bool);
+    var n: usize = 0;
+    for (binding.bindings) |b| {
+        const ai = @intFromEnum(b.action);
+        if (shown[ai]) continue;
+        shown[ai] = true;
+        n += 1;
+    }
+    return n;
+}
+// Emacs-style: the help grows upward from the echo/status area as a panel of
+// lines, rather than a full-screen overlay.
+fn drawHelp(font: rl.Font, line_h: f32, win_w: f32, win_h: f32, tmp: []u8) void {
+    const status_y = win_h - 2 * line_h; // top of the status line
+    const drawLine = struct {
+        fn f(ft: rl.Font, s: [:0]const u8, px: f32, py: f32, color: rl.Color) void {
+            rl.DrawTextEx(ft, s.ptr, .{ .x = px, .y = py }, cfg.font.size, cfg.font.spacing, color);
+        }
+    }.f;
+
+    // title + content rows + footer
+    const content: usize = if (help == .nav) navRowCount() else binding.commands.len + 1;
+    const pad = line_h * 0.5;
+    const block_h = @as(f32, @floatFromInt(content + 2)) * line_h + pad * 2;
+    const top = @max(0, status_y - block_h);
+    rl.DrawRectangle(0, @intFromFloat(top), @intFromFloat(win_w), @intFromFloat(status_y - top), cfg.colors.status_bg);
+    rl.DrawRectangle(0, @intFromFloat(top), @intFromFloat(win_w), 1, cfg.colors.gutter);
+
+    const x = cfg.layout.margin_x + 8;
+    var y: f32 = status_y - block_h + pad;
+
+    if (help == .nav) {
+        drawLine(font, "Navigation & editing keys  (C-h)", x, y, cfg.colors.cursor);
+        y += line_h;
+        var shown = std.mem.zeroes([action_slots]bool);
+        for (binding.bindings) |b| {
+            const ai = @intFromEnum(b.action);
+            if (shown[ai]) continue;
+            shown[ai] = true;
+            var cbuf: [96]u8 = undefined;
+            var clen: usize = 0;
+            var first = true;
+            for (binding.bindings) |b2| {
+                if (b2.action != b.action) continue;
+                if (!first) {
+                    cbuf[clen] = ',';
+                    cbuf[clen + 1] = ' ';
+                    clen += 2;
+                }
+                first = false;
+                var one: [24]u8 = undefined;
+                const cs = comboName(&one, b2);
+                @memcpy(cbuf[clen .. clen + cs.len], cs);
+                clen += cs.len;
+            }
+            var lbuf: [32]u8 = undefined;
+            const lab = actionLabel(&lbuf, b.action);
+            const line = std.fmt.bufPrintSentinel(tmp, "{s:<22}{s}", .{ cbuf[0..clen], lab }, 0) catch continue;
+            drawLine(font, line, x, y, cfg.colors.fg);
+            y += line_h;
+        }
+    } else {
+        drawLine(font, "Commands  (C-t h)  —  C-t then name, or chord", x, y, cfg.colors.cursor);
+        y += line_h;
+        for (binding.commands) |c| {
+            var chord: []const u8 = "";
+            var chbuf: [24]u8 = undefined;
+            for (binding.prefix_bindings) |pb| {
+                if (pb.action != c.action) continue;
+                var one: [16]u8 = undefined;
+                const cs = comboName(&one, pb);
+                @memcpy(chbuf[0..4], "C-t ");
+                @memcpy(chbuf[4 .. 4 + cs.len], cs);
+                chord = chbuf[0 .. 4 + cs.len];
+                break;
+            }
+            const line = std.fmt.bufPrintSentinel(tmp, "{s:<16}{s}", .{ c.name, chord }, 0) catch continue;
+            drawLine(font, line, x, y, cfg.colors.fg);
+            y += line_h;
+        }
+        drawLine(font, "C-t t : type a command", x, y, cfg.colors.gutter);
+        y += line_h;
+    }
+    drawLine(font, "Press any key to close", x, y, cfg.colors.gutter);
 }
 
 /// Floor a float to usize, treating <= 0 as 0 (avoids @intFromFloat panics
