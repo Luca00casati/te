@@ -31,6 +31,24 @@ pub fn build(b: *std.Build) void {
     const mod = exe.root_module;
     mod.link_libc = true;
 
+    // --- editor font (UnifontEX), fetched at build time ------------------------
+    // Zig's package manager only accepts tarballs/git repos, not a bare .ttf, so
+    // a small tool (tools/fetch_font.zig) downloads the ~14 MB font over HTTPS
+    // with std.http (no external tools), verifies its SHA-256, and writes it into
+    // the build cache (gitignored). We embed that via an anonymous import. The
+    // build system caches the result, re-running only when the tool changes.
+    const fetch_font = b.addExecutable(.{
+        .name = "fetch_font",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fetch_font.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_fetch = b.addRunArtifact(fetch_font);
+    const font_file = run_fetch.addOutputFileArg("UnifontExMono.ttf");
+    mod.addAnonymousImport("UnifontExMono.ttf", .{ .root_source_file = font_file });
+
     // --- raylib source, fetched by the Zig package manager (build.zig.zon) ---
     const srcdir = comptime depRoot("raylib") ++ "/src";
     const lp = struct {

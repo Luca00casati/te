@@ -3,15 +3,77 @@ const std = @import("std");
 const rl = @import("rl");
 const cfg = @import("config.zig");
 const binding = @import("binding.zig");
+const glyphs = @import("glyphs.zig");
 
 const Dir = std.Io.Dir;
 
-// Monospace font embedded at compile time (Roboto Mono Regular).
-const font_ttf = @embedFile("font.ttf");
+// The editor renders entirely with UnifontEX. The common codepoints below are
+// baked into a shared texture atlas for fast batched drawing; everything else
+// (CJK, emoji, rarer scripts) is rasterized on demand by `glyphs`. Cover Basic
+// Latin, Latin-1/Extended, Greek, and Cyrillic, plus common typographic
+// punctuation (dashes, curly quotes, ellipsis…). `inAtlas` must match this set.
+const font_codepoints = blk: {
+    @setEvalBranchQuota(20000);
+    const ranges = [_][2]c_int{
+        .{ 0x20, 0x24F }, // Basic Latin, Latin-1 Supplement, Latin Extended-A & B
+        .{ 0x370, 0x3FF }, // Greek and Coptic
+        .{ 0x400, 0x4FF }, // Cyrillic
+    };
+    const extra = [_]c_int{
+        0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, // hyphens & dashes
+        0x2018, 0x2019, 0x201A, 0x201C, 0x201D, 0x201E, // curly quotes
+        0x2020, 0x2021, 0x2022, 0x2026, // dagger, double dagger, bullet, ellipsis
+        0x2030, 0x2039, 0x203A, // per mille, angle quotes
+        0x20AC, 0x2122, // euro, trademark
+    };
+    var count: usize = extra.len;
+    for (ranges) |r| count += @intCast(r[1] - r[0] + 1);
+    var arr: [count]c_int = undefined;
+    var i: usize = 0;
+    for (ranges) |r| {
+        var c: c_int = r[0];
+        while (c <= r[1]) : (c += 1) {
+            arr[i] = c;
+            i += 1;
+        }
+    }
+    for (extra) |e| {
+        arr[i] = e;
+        i += 1;
+    }
+    break :blk arr;
+};
+
+// Build the shared atlas from UnifontEX at `size` px. We assemble it by hand
+// (rather than LoadFontFromMemory) so we can rasterize with FONT_BITMAP — no
+// anti-aliasing — and pair it with point filtering, keeping Unifont's pixels
+// crisp instead of blurred.
+fn buildAtlasFont(size: c_int) rl.Font {
+    var f: rl.Font = std.mem.zeroes(rl.Font);
+    f.baseSize = size;
+    f.glyphPadding = 1;
+    var count: c_int = 0;
+    f.glyphs = rl.LoadFontData(glyphs.data.ptr, @intCast(glyphs.data.len), size, &font_codepoints, @intCast(font_codepoints.len), rl.FONT_BITMAP, &count);
+    if (f.glyphs == null) return f;
+    f.glyphCount = count;
+    var recs: [*c]rl.Rectangle = null;
+    const atlas = rl.GenImageFontAtlas(f.glyphs, &recs, count, size, f.glyphPadding, 0);
+    f.recs = recs;
+    f.texture = rl.LoadTextureFromImage(atlas);
+    rl.UnloadImage(atlas);
+    rl.SetTextureFilter(f.texture, rl.TEXTURE_FILTER_POINT);
+    return f;
+}
 
 // Runtime services handed to us via the Init parameter to main().
 var io: std.Io = undefined;
 var gpa: std.mem.Allocator = undefined;
+
+// `--screenshot <frames> <path>`: after rendering `frames` frames, save a PNG
+// to `path` and quit. Handy for headless verification. 0 = disabled.
+var shot_left: i32 = 0;
+var shot_path_buf: [4096]u8 = undefined;
+var shot_path: [:0]const u8 = "";
 
 // ---------------------------------------------------------------------------
 // Text buffer: a flat byte array. `cursor` is the caret; `anchor` marks the
@@ -376,11 +438,16 @@ fn cursorLineCol() struct { line: usize, col: usize } {
     var line: usize = 0;
     var col: usize = 0;
     var i: usize = 0;
-    while (i < cursor) : (i += 1) {
+    while (i < cursor) {
         if (text[i] == '\n') {
             line += 1;
             col = 0;
-        } else if (!isCont(text[i])) col += 1;
+            i += 1;
+        } else {
+            const d = decodeCp(i, cursor);
+            col += cpCells(d.cp);
+            i += d.len;
+        }
     }
     return .{ .line = line, .col = col };
 }
@@ -390,26 +457,91 @@ fn cursorLineCol() struct { line: usize, col: usize } {
 fn visRows(line_cols: usize, cols: usize) usize {
     return @max(1, (line_cols + cols - 1) / cols);
 }
-// Display columns (UTF-8 codepoints) in text[a..b]. One column per codepoint,
-// so multi-byte characters occupy a single cell like the font renders them.
+// Decode one UTF-8 codepoint at text[i]; on malformed bytes fall back to a
+// single byte so the editor never gets stuck mid-buffer.
+const Cp = struct { cp: u32, len: usize };
+fn decodeCp(i: usize, stop: usize) Cp {
+    const b = text[i];
+    if (b < 0x80) return .{ .cp = b, .len = 1 };
+    const n = std.unicode.utf8ByteSequenceLength(b) catch return .{ .cp = b, .len = 1 };
+    if (i + n > stop) return .{ .cp = b, .len = 1 };
+    const cp = std.unicode.utf8Decode(text[i .. i + n]) catch return .{ .cp = b, .len = 1 };
+    return .{ .cp = cp, .len = n };
+}
+// Whether `cp` is baked into the shared atlas (fast batched path). Must match
+// the ranges in `font_codepoints`.
+fn inAtlas(cp: u32) bool {
+    return (cp >= 0x20 and cp <= 0x24F) or
+        (cp >= 0x370 and cp <= 0x3FF) or
+        (cp >= 0x400 and cp <= 0x4FF) or
+        (cp >= 0x2010 and cp <= 0x2026) or
+        cp == 0x2030 or cp == 0x2039 or cp == 0x203A or cp == 0x20AC or cp == 0x2122;
+}
+// Display width of `cp` in cells. Atlas glyphs are half-width; anything else
+// asks Unifont (full-width CJK/emoji occupy two cells).
+fn cpCells(cp: u32) usize {
+    if (cp < 0x20) return 1;
+    if (inAtlas(cp)) return 1;
+    return glyphs.cells(cp);
+}
+// Sum of display columns in text[a..b].
 fn colsIn(a: usize, b: usize) usize {
     var n: usize = 0;
     var i = a;
-    while (i < b) : (i += 1) {
-        if (!isCont(text[i])) n += 1;
+    while (i < b) {
+        const d = decodeCp(i, b);
+        n += cpCells(d.cp);
+        i += d.len;
     }
     return n;
 }
-// Byte offset of the `col`-th display column within [start, stop), clamped to
-// `stop` when the range holds fewer than `col` columns.
+// Byte offset of the `col`-th display column within [start, stop). A full-width
+// glyph that would straddle `col` is not split: the offset lands just before it.
 fn byteAtCol(start: usize, stop: usize, col: usize) usize {
     var i = start;
     var c: usize = 0;
-    while (i < stop and c < col) : (c += 1) {
-        i += 1;
-        while (i < stop and isCont(text[i])) i += 1;
+    while (i < stop and c < col) {
+        const d = decodeCp(i, stop);
+        const w = cpCells(d.cp);
+        if (c + w > col) break;
+        c += w;
+        i += d.len;
     }
     return i;
+}
+
+// Draw text[s..e] from pixel (x0, y): consecutive atlas codepoints are batched
+// into one DrawTextEx run, while each fall-back glyph (CJK, emoji, rarer
+// scripts) is blitted from the lazy Unifont cache into its cell(s).
+var draw_tmp: [8192]u8 = undefined;
+fn flushRun(font: rl.Font, fsize: f32, sp: f32, a: usize, b: usize, x: f32, y: f32, color: rl.Color) void {
+    if (b <= a) return;
+    const n = @min(b - a, draw_tmp.len - 1);
+    @memcpy(draw_tmp[0..n], text[a .. a + n]);
+    draw_tmp[n] = 0;
+    rl.DrawTextEx(font, &draw_tmp, .{ .x = x, .y = y }, fsize, sp, color);
+}
+fn drawCells(font: rl.Font, cw: f32, fsize: f32, sp: f32, x0: f32, y: f32, s: usize, e: usize, color: rl.Color) void {
+    var x = x0;
+    var i = s;
+    var run_start = s;
+    var run_x = x0;
+    while (i < e) {
+        const d = decodeCp(i, e);
+        if (d.cp < 0x20 or inAtlas(d.cp)) {
+            x += cw;
+            i += d.len;
+            continue;
+        }
+        flushRun(font, fsize, sp, run_start, i, run_x, y, color);
+        const g = glyphs.get(d.cp);
+        if (g.has) rl.DrawTextureV(g.tex, .{ .x = x + g.ox, .y = y + g.oy }, color);
+        x += @as(f32, @floatFromInt(g.cells)) * cw;
+        i += d.len;
+        run_start = i;
+        run_x = x;
+    }
+    flushRun(font, fsize, sp, run_start, i, run_x, y, color);
 }
 
 // --- clipboard -------------------------------------------------------------
@@ -792,9 +924,11 @@ pub fn main(init: std.process.Init) void {
 
     const font_size = cfg.font.size;
     const spacing = cfg.font.spacing;
-    var font = rl.LoadFontFromMemory(".ttf", font_ttf, @intCast(font_ttf.len), @intFromFloat(font_size), null, 0);
+    var font = buildAtlasFont(@intFromFloat(font_size));
     if (font.texture.id == 0) font = rl.GetFontDefault();
     defer rl.UnloadFont(font);
+    glyphs.init(gpa, @intFromFloat(font_size));
+    defer glyphs.deinit();
 
     const char_w: f32 = rl.MeasureTextEx(font, "M", font_size, spacing).x;
     const line_h: f32 = font_size + cfg.font.line_gap;
@@ -802,13 +936,25 @@ pub fn main(init: std.process.Init) void {
     const margin_y = cfg.layout.margin_y;
     blink_base = rl.GetTime();
 
-    // optional filename argument (after window init so echo works)
+    // Arguments (parsed after window init so echo works): an optional file to
+    // open, and `--screenshot <frames> <path>`.
     if (std.process.Args.Iterator.initAllocator(init.minimal.args, gpa)) |*ait| {
         var args = ait.*;
         defer args.deinit();
         _ = args.next(); // argv[0]
-        if (args.next()) |arg| {
-            if (arg.len > 0) openPath(arg);
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--screenshot")) {
+                const frames = args.next() orelse break;
+                const path = args.next() orelse break;
+                shot_left = std.fmt.parseInt(i32, frames, 10) catch 1;
+                if (shot_left < 1) shot_left = 1;
+                const m = @min(path.len, shot_path_buf.len - 1);
+                @memcpy(shot_path_buf[0..m], path[0..m]);
+                shot_path_buf[m] = 0;
+                shot_path = shot_path_buf[0..m :0];
+            } else if (arg.len > 0) {
+                openPath(arg);
+            }
         }
     } else |_| {}
 
@@ -934,10 +1080,7 @@ pub fn main(init: std.process.Init) void {
                         rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
                     }
 
-                    const draw_len = @min(seg_e - seg_s, line_tmp.len - 1);
-                    @memcpy(line_tmp[0..draw_len], text[seg_s .. seg_s + draw_len]);
-                    line_tmp[draw_len] = 0;
-                    rl.DrawTextEx(font, &line_tmp, .{ .x = text_x0, .y = y }, font_size, spacing, cfg.colors.fg);
+                    drawCells(font, char_w, font_size, spacing, text_x0, y, seg_s, seg_e, cfg.colors.fg);
                     row += 1;
                 }
                 li += 1;
@@ -979,10 +1122,7 @@ pub fn main(init: std.process.Init) void {
                     rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
 
                     const vis_start = byteAtCol(s, e, left_col);
-                    const draw_len = @min(e - vis_start, line_tmp.len - 1);
-                    @memcpy(line_tmp[0..draw_len], text[vis_start .. vis_start + draw_len]);
-                    line_tmp[draw_len] = 0;
-                    rl.DrawTextEx(font, &line_tmp, .{ .x = text_x0, .y = y }, font_size, spacing, cfg.colors.fg);
+                    drawCells(font, char_w, font_size, spacing, text_x0, y, vis_start, e, cfg.colors.fg);
                 }
                 li += 1;
                 if (e >= len) break;
@@ -1013,6 +1153,13 @@ pub fn main(init: std.process.Init) void {
         if (help != .none) drawHelp(font, line_h, win_w, win_h, &line_tmp);
 
         rl.EndDrawing();
+        if (shot_left > 0) {
+            shot_left -= 1;
+            if (shot_left == 0) {
+                _ = rl.TakeScreenshot(shot_path.ptr);
+                running = false;
+            }
+        }
     }
 
     freeHistory();

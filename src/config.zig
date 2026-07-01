@@ -10,8 +10,10 @@ pub const window = struct {
 };
 
 pub const font = struct {
-    /// Glyph height in pixels.
-    pub const size: f32 = 20;
+    /// Glyph height in pixels. UnifontEX is a 16 px bitmap design, so multiples
+    /// of 16 (16, 32, …) stay pixel-crisp; other sizes rasterize with uneven,
+    /// "wobbly" stems.
+    pub const size: f32 = 16;
     /// Extra horizontal space between glyphs.
     pub const spacing: f32 = 0;
     /// Extra vertical space between lines (line height = size + line_gap).

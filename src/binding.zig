@@ -1,6 +1,6 @@
 //! Key bindings — map keys (and modifiers) to editor actions in one place.
 //! Edit the `bindings` table to rebind; `main.zig` dispatches each `Action`.
-//!
+//! 😄
 //! Text typing, selection-with-Shift, and the mouse are handled directly in
 //! `main.zig` (they aren't single key → action mappings).
 
