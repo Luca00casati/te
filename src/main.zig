@@ -107,6 +107,10 @@ var shift: bool = false;
 // True only while a plain (Shift+navigation) move is extending the selection;
 // false for chorded moves like Ctrl+Shift+L, which should just move.
 var sel_extend: bool = false;
+// Mark (C-Space): while active, movement extends the selection, Emacs-style.
+var mark_active: bool = false;
+// Repeat count from C-<digit>: the next action runs this many times (null = 1).
+var repeat_count: ?usize = null;
 var blink_base: f64 = 0;
 var quit_requested: bool = false;
 var running: bool = true;
@@ -118,11 +122,20 @@ var running: bool = true;
 const MbKind = enum { none, text_prompt, char_query };
 const MbIntent = enum { none, find_file, write_file, search, quit, command };
 
-// True after the prefix key (Ctrl-T) until the next key resolves it: a chord
-// fires a shortcut directly, a printable key opens the command-name prompt.
+// True after the leader (double-tap Ctrl) until the next key resolves it: a
+// chord fires a shortcut directly, a printable key opens the command-name
+// prompt.
 var prefix_pending: bool = false;
 
-// Help overlay: C-h lists the direct keybindings, C-t h lists the named
+// Ctrl double/triple-tap detection. A "tap" is Ctrl pressed then released with
+// no other key in between. Two taps arm the leader; three open the command
+// prompt. Taps must come within `ctrl_tap_window` of each other.
+const ctrl_tap_window: f64 = 0.4;
+var ctrl_taps: u8 = 0;
+var ctrl_tap_at: f64 = 0;
+var ctrl_clean: bool = false; // current Ctrl hold has seen no other key yet
+
+// Help overlay: C-h lists the direct keybindings, the leader + h lists the named
 // commands. While shown it covers the editor and any key/click closes it.
 const HelpKind = enum { none, nav, commands };
 var help: HelpKind = .none;
@@ -289,15 +302,23 @@ fn clearRedo() void {
     redo_n = 0;
 }
 fn undo() void {
-    if (undo_n == 0) return;
+    if (undo_n == 0) {
+        echo("no more undo");
+        return;
+    }
     undo_n -= 1;
     const e = undo_stack[undo_n];
     replaceRange(e.pos, e.pos + e.inserted.len, e.removed);
     cursor = e.cur_before;
     anchor = cursor;
-    dirty = true;
     pushRaw(&redo_stack, &redo_n, e);
     noteActivity();
+    // Undone back to the start: the buffer matches where history began, so
+    // treat the file as untouched again.
+    if (undo_n == 0) {
+        dirty = false;
+        echo("no more undo");
+    } else dirty = true;
 }
 fn redo() void {
     if (redo_n == 0) return;
@@ -545,14 +566,76 @@ fn drawCells(font: rl.Font, cw: f32, fsize: f32, sp: f32, x0: f32, y: f32, s: us
 }
 
 // --- clipboard -------------------------------------------------------------
-fn copySelection() void {
-    if (!hasSel()) return;
-    const a = selMin();
-    const b = selMax();
+fn copyRange(a: usize, b: usize) void {
+    if (b <= a) return;
     const buf = gpa.allocSentinel(u8, b - a, 0) catch return;
     defer gpa.free(buf);
     @memcpy(buf[0 .. b - a], text[a..b]);
     rl.SetClipboardText(buf.ptr);
+}
+fn copySelection() void {
+    if (!hasSel()) return;
+    copyRange(selMin(), selMax());
+}
+
+// --- whole-line operations -------------------------------------------------
+// Byte range of the current line including its trailing newline (if any).
+fn currentLineSpan() struct { start: usize, end: usize } {
+    const ls = lineStart(cursor);
+    const le = lineEnd(cursor);
+    return .{ .start = ls, .end = if (le < len) le + 1 else le };
+}
+// Swap the current line with an adjacent one. `down` picks the line below,
+// else above. The cursor rides along, keeping its column.
+fn swapLine(down: bool) void {
+    const ls = lineStart(cursor);
+    const le = lineEnd(cursor);
+    const col = cursor - ls;
+    if (down) {
+        if (le >= len) return; // last line: nothing below
+        const ns = le + 1;
+        const ne = lineEnd(ns);
+        const a = le - ls; // current line length
+        const b = ne - ns; // next line length
+        const buf = gpa.alloc(u8, ne - ls) catch return;
+        defer gpa.free(buf);
+        @memcpy(buf[0..b], text[ns..ne]);
+        buf[b] = '\n';
+        @memcpy(buf[b + 1 ..][0..a], text[ls..le]);
+        edit(ls, ne, buf);
+        cursor = ls + b + 1 + @min(col, a);
+    } else {
+        if (ls == 0) return; // first line: nothing above
+        const ps = lineStart(ls - 1);
+        const pe = ls - 1; // previous line end (the newline before us)
+        const a = pe - ps; // previous line length
+        const b = le - ls; // current line length
+        const buf = gpa.alloc(u8, le - ps) catch return;
+        defer gpa.free(buf);
+        @memcpy(buf[0..b], text[ls..le]);
+        buf[b] = '\n';
+        @memcpy(buf[b + 1 ..][0..a], text[ps..pe]);
+        edit(ps, le, buf);
+        cursor = ps + @min(col, b);
+    }
+    anchor = cursor;
+}
+// Paste the clipboard as whole line(s) above the current line.
+fn pasteLine() void {
+    const c = rl.GetClipboardText();
+    if (c == null) return;
+    const s = std.mem.span(@as([*:0]const u8, @ptrCast(c)));
+    if (s.len == 0) return;
+    const ls = lineStart(cursor);
+    if (s[s.len - 1] == '\n') {
+        edit(ls, ls, s);
+    } else {
+        const buf = gpa.alloc(u8, s.len + 1) catch return;
+        defer gpa.free(buf);
+        @memcpy(buf[0..s.len], s);
+        buf[s.len] = '\n';
+        edit(ls, ls, buf);
+    }
 }
 fn pasteClipboard() void {
     const c = rl.GetClipboardText();
@@ -593,6 +676,7 @@ fn openPath(path: []const u8) void {
 }
 fn saveFile() bool {
     Dir.cwd().writeFile(io, .{ .sub_path = filename, .data = text[0..len] }) catch return false;
+    freeHistory(); // the saved buffer is the new baseline; drop undo/redo history
     dirty = false;
     has_file = true;
     return true;
@@ -783,14 +867,40 @@ fn afterMove() void {
     if (!sel_extend) anchor = cursor;
     noteActivity();
 }
+// Run an action, honoring a pending C-<digit> repeat count: the action fires
+// `repeat_count` times and the echo area reports it (e.g. "move left x3").
+fn runAction(action: binding.Action) void {
+    const n = @min(repeat_count orelse 1, 9999);
+    repeat_count = null;
+    var i: usize = 0;
+    while (i < n) : (i += 1) applyAction(action);
+    if (n > 1) {
+        var buf: [40]u8 = undefined;
+        echoFmt("{s} x{d}", .{ actionLabel(&buf, action), n });
+    }
+}
 fn applyAction(action: binding.Action) void {
     // Only vertical moves preserve the sticky column; everything else drops it.
     switch (action) {
         .move_up, .move_down, .page_up, .page_down => {},
         else => goal_col = null,
     }
+    // Echo the committed action to the minibuffer. Actions that set their own
+    // message (e.g. wrap on/off) or open a prompt run below and override this.
+    var action_label: [32]u8 = undefined;
+    echo(actionLabel(&action_label, action));
     switch (action) {
         .newline => insertBytes("\n"),
+        .open_line_below => {
+            const pos = lineEnd(cursor);
+            edit(pos, pos, "\n"); // cursor lands at the start of the new line
+        },
+        .open_line_above => {
+            const ls = lineStart(cursor);
+            edit(ls, ls, "\n");
+            cursor = ls; // move onto the fresh blank line above
+            anchor = ls;
+        },
         .indent => insertBytes(cfg.layout.tab),
         .delete_back => deleteBack(),
         .delete_forward => deleteForward(),
@@ -853,6 +963,40 @@ fn applyAction(action: binding.Action) void {
             deleteSelection();
         },
         .paste => pasteClipboard(),
+        .move_line_left => {
+            const ls = lineStart(cursor);
+            if (ls < len and (text[ls] == ' ' or text[ls] == '\t')) {
+                const c = cursor;
+                edit(ls, ls + 1, "");
+                cursor = if (c > ls) c - 1 else ls;
+                anchor = cursor;
+            }
+        },
+        .move_line_right => {
+            const ls = lineStart(cursor);
+            const c = cursor;
+            edit(ls, ls, " ");
+            cursor = c + 1;
+            anchor = cursor;
+        },
+        .move_line_up => swapLine(false),
+        .move_line_down => swapLine(true),
+        .cut_line => {
+            const s = currentLineSpan();
+            copyRange(s.start, s.end);
+            edit(s.start, s.end, "");
+        },
+        .copy_line => {
+            const s = currentLineSpan();
+            copyRange(s.start, s.end);
+        },
+        .paste_line => pasteLine(),
+        .select_line => {
+            const s = currentLineSpan();
+            anchor = s.start;
+            cursor = s.end;
+            noteActivity();
+        },
         .save => if (has_file) saveCurrent() else mbStartPrompt(.write_file, "Write file: ", filename),
         .save_as => mbStartPrompt(.write_file, "Write file: ", filename),
         .open => mbStartPrompt(.find_file, "Find file: ", ""),
@@ -987,12 +1131,17 @@ pub fn main(init: std.process.Init) void {
             if (rl.GetKeyPressed() != 0 or rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) help = .none;
         } else if (mb_kind != .none) {
             handleMinibuffer(ctrl);
-        } else if (prefix_pending) {
-            handlePrefix(ctrl);
         } else {
-            handleInput(ctrl, metrics);
-            if (rl.WindowShouldClose() or quit_requested) {
-                if (dirty) mbStartQuery(.quit, "Save changes? (y) yes  (n) no  (c) cancel") else running = false;
+            detectCtrlTaps(); // may arm the leader or open the command prompt
+            if (mb_kind != .none) {
+                // command prompt just opened by a triple Ctrl tap
+            } else if (prefix_pending) {
+                handlePrefix(ctrl);
+            } else {
+                handleInput(ctrl, metrics);
+                if (rl.WindowShouldClose() or quit_requested) {
+                    if (dirty) mbStartQuery(.quit, "Save changes? (y) yes  (n) no  (c) cancel") else running = false;
+                }
             }
         }
 
@@ -1166,9 +1315,12 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn handleInput(ctrl: bool, m: Metrics) void {
-    // Esc clears the selection (the minibuffer, when open, handles Esc itself).
+    // Esc clears the selection, mark, and any pending repeat count (the
+    // minibuffer, when open, handles Esc itself).
     if (rl.IsKeyPressed(rl.KEY_ESCAPE)) {
         anchor = cursor;
+        mark_active = false;
+        repeat_count = null;
         noteActivity();
     }
     if (!ctrl) {
@@ -1179,6 +1331,8 @@ fn handleInput(ctrl: bool, m: Metrics) void {
             if (n > 0) {
                 insertBytes(enc[0..n]);
                 goal_col = null;
+                mark_active = false; // self-insert ends the mark (Emacs-style)
+                repeat_count = null;
             }
         }
     }
@@ -1187,11 +1341,32 @@ fn handleInput(ctrl: bool, m: Metrics) void {
         help = .nav;
         return;
     }
-    // Emacs prefix: Ctrl-T arms the leader; handlePrefix takes over next frame.
-    if (ctrl and !shift and rl.IsKeyPressed(binding.prefix_key)) {
-        prefix_pending = true;
+    // C-Enter opens a blank line below; C-Shift-Enter opens one above. Handled
+    // here (not via the table) so the plain-Enter binding doesn't also fire.
+    if (ctrl and (rl.IsKeyPressed(rl.KEY_ENTER) or rl.IsKeyPressed(rl.KEY_KP_ENTER))) {
+        runAction(if (shift) .open_line_above else .open_line_below);
+        return;
+    }
+    // C-Space toggles the selection mark: while set, movement extends the region.
+    if (ctrl and rl.IsKeyPressed(rl.KEY_SPACE)) {
+        mark_active = !mark_active;
+        anchor = cursor;
+        echo(if (mark_active) "Mark set" else "Mark deactivated");
         noteActivity();
         return;
+    }
+    // C-<digit> accumulates a repeat count for the next action.
+    if (ctrl and !shift) {
+        var d: c_int = 0;
+        while (d <= 9) : (d += 1) {
+            if (rl.IsKeyPressed(rl.KEY_ZERO + d) or rl.IsKeyPressed(rl.KEY_KP_0 + d)) {
+                const cur = repeat_count orelse 0;
+                repeat_count = @min(cur * 10 + @as(usize, @intCast(d)), 9999);
+                echoFmt("Repeat: {d}", .{repeat_count.?});
+                noteActivity();
+                return;
+            }
+        }
     }
     for (binding.bindings) |b| {
         const mod_ok = switch (b.mod) {
@@ -1202,10 +1377,10 @@ fn handleInput(ctrl: bool, m: Metrics) void {
         if (!mod_ok) continue;
         const hit = if (b.repeat) pressed(b.key) else rl.IsKeyPressed(b.key);
         if (hit) {
-            // Shift extends the selection only on plain navigation keys, not
-            // when it's part of a chord (e.g. Ctrl+Shift+L just moves).
-            sel_extend = shift and b.mod == .any;
-            applyAction(b.action);
+            // Extend the selection when the mark is active, or on a plain
+            // Shift+navigation key (not when Shift is part of a chord).
+            sel_extend = mark_active or (shift and b.mod == .any);
+            runAction(b.action);
         }
     }
     const wheel = rl.GetMouseWheelMove();
@@ -1228,28 +1403,56 @@ fn handleInput(ctrl: bool, m: Metrics) void {
     }
 }
 
-// Prefix is armed: resolve the next key. Esc/C-g cancels; C-t t opens the
-// named-command prompt; otherwise a chord fires a shortcut directly. Chords
-// match with Ctrl optional (C-t s == C-t C-s); Shift selects shifted variants.
+// Detect Ctrl double/triple taps. A tap is Ctrl pressed then released with no
+// other key pressed while it was held. Two taps within `ctrl_tap_window` arm
+// the leader; a third opens the command prompt. Runs only in normal editing
+// mode. Draining the key-pressed queue here is safe: bindings use IsKeyPressed
+// and text uses GetCharPressed, both independent of GetKeyPressed.
+fn detectCtrlTaps() void {
+    const lc = rl.KEY_LEFT_CONTROL;
+    const rc = rl.KEY_RIGHT_CONTROL;
+    if (rl.IsKeyPressed(lc) or rl.IsKeyPressed(rc)) ctrl_clean = true;
+    var k = rl.GetKeyPressed();
+    while (k != 0) : (k = rl.GetKeyPressed()) {
+        if (k != lc and k != rc) {
+            ctrl_clean = false; // a real key was pressed with Ctrl: not a tap
+            ctrl_taps = 0; // and it breaks any tap run in progress
+        }
+    }
+    if (rl.IsKeyReleased(lc) or rl.IsKeyReleased(rc)) {
+        if (ctrl_clean) {
+            const now = rl.GetTime();
+            ctrl_taps = if (now - ctrl_tap_at <= ctrl_tap_window) ctrl_taps + 1 else 1;
+            ctrl_tap_at = now;
+            if (ctrl_taps == 2) {
+                prefix_pending = true;
+                noteActivity();
+            } else if (ctrl_taps >= 3) {
+                ctrl_taps = 0;
+                prefix_pending = false;
+                mbStartPrompt(.command, "Command: ", "");
+            }
+        }
+        ctrl_clean = false;
+    }
+}
+
+// Prefix is armed: resolve the next key. Esc/C-g cancels; otherwise a chord
+// fires a shortcut directly. Chords match with Ctrl optional (leader s ==
+// leader C-s); Shift selects shifted variants.
 fn handlePrefix(ctrl: bool) void {
     if (rl.IsKeyPressed(rl.KEY_ESCAPE) or (ctrl and rl.IsKeyPressed(rl.KEY_G))) {
         prefix_pending = false;
         echo("Quit");
         return;
     }
-    // C-t h -> commands help overlay
+    // leader h -> commands help overlay
     if (rl.IsKeyPressed(rl.KEY_H)) {
         prefix_pending = false;
         help = .commands;
         return;
     }
-    // typed-command entry: C-t t (or C-t C-t) -> "Command:" prompt
-    if (!shift and rl.IsKeyPressed(binding.prefix_key)) {
-        prefix_pending = false;
-        mbStartPrompt(.command, "Command: ", "");
-        return;
-    }
-    // chord path: C-t <key>, with or without Ctrl
+    // chord path: leader <key>, with or without Ctrl
     for (binding.prefix_bindings) |b| {
         const mod_ok = switch (b.mod) {
             .any => true,
@@ -1275,7 +1478,7 @@ fn drawMinibuffer(font: rl.Font, char_w: f32, y: f32, tmp: []u8) void {
     const sp = cfg.font.spacing;
     if (mb_kind == .none) {
         if (prefix_pending) {
-            rl.DrawTextEx(font, "C-t-", .{ .x = cfg.layout.margin_x, .y = y + 2 }, fs, sp, cfg.colors.fg);
+            rl.DrawTextEx(font, "Ctrlx2-", .{ .x = cfg.layout.margin_x, .y = y + 2 }, fs, sp, cfg.colors.fg);
             return;
         }
         // echo area
@@ -1440,7 +1643,7 @@ fn drawHelp(font: rl.Font, line_h: f32, win_w: f32, win_h: f32, tmp: []u8) void 
             y += line_h;
         }
     } else {
-        drawLine(font, "Commands  (C-t h)  —  C-t then name, or chord", x, y, cfg.colors.cursor);
+        drawLine(font, "Commands  (Ctrlx2 = double-tap Ctrl, then h)  —  then name, or chord", x, y, cfg.colors.cursor);
         y += line_h;
         for (binding.commands) |c| {
             var chord: []const u8 = "";
@@ -1449,16 +1652,17 @@ fn drawHelp(font: rl.Font, line_h: f32, win_w: f32, win_h: f32, tmp: []u8) void 
                 if (pb.action != c.action) continue;
                 var one: [16]u8 = undefined;
                 const cs = comboName(&one, pb);
-                @memcpy(chbuf[0..4], "C-t ");
-                @memcpy(chbuf[4 .. 4 + cs.len], cs);
-                chord = chbuf[0 .. 4 + cs.len];
+                const pfx = "Ctrlx2 ";
+                @memcpy(chbuf[0..pfx.len], pfx);
+                @memcpy(chbuf[pfx.len .. pfx.len + cs.len], cs);
+                chord = chbuf[0 .. pfx.len + cs.len];
                 break;
             }
             const line = std.fmt.bufPrintSentinel(tmp, "{s:<16}{s}", .{ c.name, chord }, 0) catch continue;
             drawLine(font, line, x, y, cfg.colors.fg);
             y += line_h;
         }
-        drawLine(font, "C-t t : type a command", x, y, cfg.colors.gutter);
+        drawLine(font, "Ctrlx3 (triple-tap Ctrl) : type a command", x, y, cfg.colors.gutter);
         y += line_h;
     }
     drawLine(font, "Press any key to close", x, y, cfg.colors.gutter);
