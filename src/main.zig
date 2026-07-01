@@ -1329,10 +1329,14 @@ fn handleInput(ctrl: bool, m: Metrics) void {
             var enc: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(@intCast(cp), &enc) catch 0;
             if (n > 0) {
-                insertBytes(enc[0..n]);
+                // A pending C-<digit> count repeats this character (C-3 w -> www).
+                const reps = @min(repeat_count orelse 1, 9999);
+                repeat_count = null;
+                var i: usize = 0;
+                while (i < reps) : (i += 1) insertBytes(enc[0..n]);
+                if (reps > 1) echoFmt("insert '{s}' x{d}", .{ enc[0..n], reps });
                 goal_col = null;
                 mark_active = false; // self-insert ends the mark (Emacs-style)
-                repeat_count = null;
             }
         }
     }

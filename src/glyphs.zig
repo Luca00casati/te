@@ -50,11 +50,32 @@ fn rasterize(cp: u32) Glyph {
         // for full-width ones. Split at three-quarters to classify robustly.
         g.cells = if (@as(c_int, info.advanceX) * 4 >= raster_px * 3) 2 else 1;
         if (info.image.width > 0 and info.image.height > 0 and info.image.data != null) {
-            g.tex = rl.LoadTextureFromImage(info.image);
-            rl.SetTextureFilter(g.tex, rl.TEXTURE_FILTER_POINT);
-            g.has = true;
-            g.ox = @floatFromInt(info.offsetX);
-            g.oy = @floatFromInt(info.offsetY);
+            // LoadFontData returns GRAYSCALE (coverage in one channel), which
+            // uploads as an opaque texture — a black box behind the glyph. Repack
+            // as GRAY_ALPHA (white, coverage-in-alpha), matching the atlas, so the
+            // background is transparent and the tint colors the glyph.
+            const w: usize = @intCast(info.image.width);
+            const h: usize = @intCast(info.image.height);
+            const src = @as([*]const u8, @ptrCast(info.image.data))[0 .. w * h];
+            if (alloc.alloc(u8, w * h * 2)) |ga| {
+                defer alloc.free(ga);
+                for (0..w * h) |p| {
+                    ga[p * 2] = 255; // luminance
+                    ga[p * 2 + 1] = src[p]; // alpha = coverage
+                }
+                const img = rl.Image{
+                    .data = @ptrCast(ga.ptr),
+                    .width = info.image.width,
+                    .height = info.image.height,
+                    .mipmaps = 1,
+                    .format = rl.PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA,
+                };
+                g.tex = rl.LoadTextureFromImage(img);
+                rl.SetTextureFilter(g.tex, rl.TEXTURE_FILTER_POINT);
+                g.has = true;
+                g.ox = @floatFromInt(info.offsetX);
+                g.oy = @floatFromInt(info.offsetY);
+            } else |_| {}
         }
         rl.UnloadFontData(gi, n);
     }

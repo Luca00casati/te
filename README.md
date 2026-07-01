@@ -17,17 +17,17 @@ Emacs-flavored. The **leader** is a **double-tap of Ctrl**; a **triple-tap**
 jumps straight to the command prompt. Every action you run is echoed on the
 bottom line (e.g. `move left x3`).
 
-**Movement**
+**Movement** (Emacs-style; the plain arrow/Home/End/PageUp keys are off by
+default — re-enable them in `src/binding.zig`)
 
 | Key | Action |
 | --- | --- |
-| Arrows / Home / End | Move caret / line start / line end |
 | Ctrl+B / F / P / N | Left / right / up / down |
 | Ctrl+Shift+A / E | Line start / end |
 | Ctrl+W / Ctrl+Shift+W | Next / previous word |
 | Ctrl+D | End of word |
-| PageUp/Down, Ctrl+J / Ctrl+Shift+J | Screen up / down |
-| Ctrl+`<digit>` | Repeat the next action N times |
+| Ctrl+J / Ctrl+Shift+J | Screen up / down |
+| Ctrl+`<digit>` | Repeat the next action **or typed character** N times (`Ctrl+3` `w` → `www`) |
 
 **Selection & clipboard**
 
