@@ -275,11 +275,20 @@ fn isWordChar(b: u8) bool {
     return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or
         (b >= '0' and b <= '9') or b == '_' or b >= 0x80;
 }
-fn moveWordRight() void {
+/// Start of the next word: finish the current word, then skip separators so
+/// the cursor lands on the first constituent of the following word.
+fn moveWordStartRight() void {
+    while (cursor < len and isWordChar(text[cursor])) cursor += 1;
+    while (cursor < len and !isWordChar(text[cursor])) cursor += 1;
+}
+/// End of the next word: skip separators, then skip the word so the cursor
+/// lands just past its last constituent.
+fn moveWordEndRight() void {
     while (cursor < len and !isWordChar(text[cursor])) cursor += 1;
     while (cursor < len and isWordChar(text[cursor])) cursor += 1;
 }
-fn moveWordLeft() void {
+/// Start of the previous word.
+fn moveWordStartLeft() void {
     while (cursor > 0 and !isWordChar(text[cursor - 1])) cursor -= 1;
     while (cursor > 0 and isWordChar(text[cursor - 1])) cursor -= 1;
 }
@@ -302,19 +311,17 @@ fn moveEnd() void {
 fn moveVertical(delta: i32) void {
     if (wrap) return moveVisual(delta);
     const ls = lineStart(cursor);
-    const col = goal_col orelse (cursor - ls);
+    const col = goal_col orelse colsIn(ls, cursor);
     goal_col = col;
     if (delta < 0) {
         if (ls == 0) return;
         const prev_start = lineStart(ls - 1);
-        const prev_len = ls - 1 - prev_start;
-        cursor = prev_start + @min(col, prev_len);
+        cursor = byteAtCol(prev_start, ls - 1, col);
     } else {
         const le = lineEnd(cursor);
         if (le >= len) return;
         const next_start = le + 1;
-        const next_len = lineEnd(next_start) - next_start;
-        cursor = next_start + @min(col, next_len);
+        cursor = byteAtCol(next_start, lineEnd(next_start), col);
     }
 }
 // Move one visual (wrapped) row, keeping the same on-screen column. Within a
@@ -323,31 +330,30 @@ fn moveVertical(delta: i32) void {
 fn moveVisual(delta: i32) void {
     const cols = @max(@as(usize, 1), view_cols);
     const ls = lineStart(cursor);
-    const col = cursor - ls;
+    const le = lineEnd(cursor);
+    const col = colsIn(ls, cursor); // display column within this logical line
     const sub = col / cols; // which visual row within this logical line
     goal_col = goal_col orelse (col % cols);
     const vcol = @min(goal_col.?, cols - 1); // on-screen column to preserve
     if (delta < 0) {
         if (sub > 0) {
-            cursor = ls + (sub - 1) * cols + vcol;
+            cursor = byteAtCol(ls, le, (sub - 1) * cols + vcol);
         } else {
             if (ls == 0) return;
             const prev_start = lineStart(ls - 1);
-            const prev_len = ls - 1 - prev_start;
-            const last_sub = visRows(prev_len, cols) - 1;
-            cursor = prev_start + @min(last_sub * cols + vcol, prev_len);
+            const prev_cols = colsIn(prev_start, ls - 1);
+            const last_sub = visRows(prev_cols, cols) - 1;
+            cursor = byteAtCol(prev_start, ls - 1, last_sub * cols + vcol);
         }
     } else {
-        const le = lineEnd(cursor);
-        const llen = le - ls;
+        const llen = colsIn(ls, le);
         const last_sub = visRows(llen, cols) - 1;
         if (sub < last_sub) {
-            cursor = ls + @min((sub + 1) * cols + vcol, llen);
+            cursor = byteAtCol(ls, le, (sub + 1) * cols + vcol);
         } else {
             if (le >= len) return;
             const next_start = le + 1;
-            const next_len = lineEnd(next_start) - next_start;
-            cursor = next_start + @min(vcol, next_len);
+            cursor = byteAtCol(next_start, lineEnd(next_start), vcol);
         }
     }
 }
@@ -374,15 +380,36 @@ fn cursorLineCol() struct { line: usize, col: usize } {
         if (text[i] == '\n') {
             line += 1;
             col = 0;
-        } else col += 1;
+        } else if (!isCont(text[i])) col += 1;
     }
     return .{ .line = line, .col = col };
 }
 // --- soft wrap -------------------------------------------------------------
-// Number of visual rows a logical line of `line_len` bytes occupies at `cols`
-// columns (>= 1, so an empty line still takes one row).
-fn visRows(line_len: usize, cols: usize) usize {
-    return @max(1, (line_len + cols - 1) / cols);
+// Number of visual rows a logical line of `line_cols` display columns occupies
+// at `cols` columns (>= 1, so an empty line still takes one row).
+fn visRows(line_cols: usize, cols: usize) usize {
+    return @max(1, (line_cols + cols - 1) / cols);
+}
+// Display columns (UTF-8 codepoints) in text[a..b]. One column per codepoint,
+// so multi-byte characters occupy a single cell like the font renders them.
+fn colsIn(a: usize, b: usize) usize {
+    var n: usize = 0;
+    var i = a;
+    while (i < b) : (i += 1) {
+        if (!isCont(text[i])) n += 1;
+    }
+    return n;
+}
+// Byte offset of the `col`-th display column within [start, stop), clamped to
+// `stop` when the range holds fewer than `col` columns.
+fn byteAtCol(start: usize, stop: usize, col: usize) usize {
+    var i = start;
+    var c: usize = 0;
+    while (i < stop and c < col) : (c += 1) {
+        i += 1;
+        while (i < stop and isCont(text[i])) i += 1;
+    }
+    return i;
 }
 
 // --- clipboard -------------------------------------------------------------
@@ -659,12 +686,16 @@ fn applyAction(action: binding.Action) void {
             moveEnd();
             afterMove();
         },
-        .move_word_left => {
-            moveWordLeft();
+        .move_word_start_left => {
+            moveWordStartLeft();
             afterMove();
         },
-        .move_word_right => {
-            moveWordRight();
+        .move_word_start_right => {
+            moveWordStartRight();
+            afterMove();
+        },
+        .move_word_end_right => {
+            moveWordEndRight();
             afterMove();
         },
         .page_up => {
@@ -730,12 +761,12 @@ fn offsetFromMouse(m: Metrics) usize {
         var s = lineStartOfRow(top_line);
         while (true) {
             const e = lineEnd(s);
-            const segs = visRows(e - s, m.visible_cols);
+            const segs = visRows(colsIn(s, e), m.visible_cols);
             if (target < vrow + segs) {
                 const seg = target - vrow;
-                const seg_s = s + seg * m.visible_cols;
-                const seg_e = @min(e, seg_s + m.visible_cols);
-                return @min(seg_s + click_col, seg_e);
+                const seg_s = byteAtCol(s, e, seg * m.visible_cols);
+                const seg_e = byteAtCol(s, e, (seg + 1) * m.visible_cols);
+                return byteAtCol(seg_s, seg_e, click_col);
             }
             vrow += segs;
             if (e >= len) return e;
@@ -746,8 +777,7 @@ fn offsetFromMouse(m: Metrics) usize {
     const lc = lineCount();
     const rrow = if (row >= lc) lc - 1 else row;
     const start = lineStartOfRow(rrow);
-    const llen = lineEnd(start) - start;
-    return start + @min(left_col + click_col, llen);
+    return byteAtCol(start, lineEnd(start), left_col + click_col);
 }
 
 pub fn main(init: std.process.Init) void {
@@ -836,13 +866,13 @@ pub fn main(init: std.process.Init) void {
                     var l = top_line;
                     while (l < cp.line) : (l += 1) {
                         const e = lineEnd(ss);
-                        used += visRows(e - ss, visible_cols);
+                        used += visRows(colsIn(ss, e), visible_cols);
                         ss = e + 1;
                     }
                 }
                 while (used >= visible and top_line < cp.line) {
                     const e = lineEnd(s);
-                    used -= visRows(e - s, visible_cols);
+                    used -= visRows(colsIn(s, e), visible_cols);
                     s = e + 1;
                     top_line += 1;
                 }
@@ -877,22 +907,22 @@ pub fn main(init: std.process.Init) void {
             var s: usize = lineStartOfRow(top_line);
             outer: while (row < visible) {
                 const e = lineEnd(s);
-                const segs = visRows(e - s, visible_cols);
+                const segs = visRows(colsIn(s, e), visible_cols);
                 var seg: usize = 0;
                 while (seg < segs) : (seg += 1) {
                     if (row >= visible) break :outer;
                     const y = margin_y + @as(f32, @floatFromInt(row)) * line_h;
-                    const seg_s = s + seg * visible_cols;
-                    const seg_e = @min(e, seg_s + visible_cols);
+                    const seg_s = byteAtCol(s, e, seg * visible_cols);
+                    const seg_e = byteAtCol(s, e, (seg + 1) * visible_cols);
                     if (li == cp.line and seg == caret_seg) caret_y = y;
 
                     if (sel_b > sel_a) {
                         const a = std.math.clamp(sel_a, seg_s, seg_e);
                         const b = std.math.clamp(sel_b, seg_s, seg_e);
                         if (b > a) rl.DrawRectangle(
-                            @intFromFloat(text_x0 + @as(f32, @floatFromInt(a - seg_s)) * char_w),
+                            @intFromFloat(text_x0 + @as(f32, @floatFromInt(colsIn(seg_s, a))) * char_w),
                             @intFromFloat(y),
-                            @intFromFloat(@as(f32, @floatFromInt(b - a)) * char_w),
+                            @intFromFloat(@as(f32, @floatFromInt(colsIn(a, b))) * char_w),
                             @intFromFloat(line_h),
                             cfg.colors.selection,
                         );
@@ -932,8 +962,8 @@ pub fn main(init: std.process.Init) void {
                         const a = std.math.clamp(sel_a, s, e);
                         const b = std.math.clamp(sel_b, s, e);
                         if (b > a) {
-                            const ca = (a - s) -| left_col;
-                            const cb = (b - s) -| left_col;
+                            const ca = colsIn(s, a) -| left_col;
+                            const cb = colsIn(s, b) -| left_col;
                             if (cb > ca) rl.DrawRectangle(
                                 @intFromFloat(text_x0 + @as(f32, @floatFromInt(ca)) * char_w),
                                 @intFromFloat(y),
@@ -948,7 +978,7 @@ pub fn main(init: std.process.Init) void {
                     const nx = margin_x + @as(f32, @floatFromInt(digits - num.len)) * char_w;
                     rl.DrawTextEx(font, num.ptr, .{ .x = nx, .y = y }, font_size, spacing, cfg.colors.gutter);
 
-                    const vis_start = s + @min(left_col, e - s);
+                    const vis_start = byteAtCol(s, e, left_col);
                     const draw_len = @min(e - vis_start, line_tmp.len - 1);
                     @memcpy(line_tmp[0..draw_len], text[vis_start .. vis_start + draw_len]);
                     line_tmp[draw_len] = 0;
