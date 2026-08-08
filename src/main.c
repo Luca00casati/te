@@ -119,6 +119,14 @@ static bool prefix_pending = false;
 static uint8_t ctrl_taps = 0;
 static bool ctrl_clean = false; // current Ctrl hold has seen no other key yet
 
+// Frames left to drop stray GetCharPressed() events after a chord/toggle key
+// (e.g. leader-S for Save, C-m for modal) resolves an action rather than
+// self-inserting. GLFW/X11 can deliver that keypress's character event a
+// frame or two late -- observed with IBus and similar async input methods --
+// by which point the action has already resolved and a same-frame drain
+// finds nothing; this keeps draining for a few more frames to still catch it.
+static int swallow_char_frames = 0;
+
 // Help overlay: the leader + n lists the direct keybindings, the leader + h
 // lists the named commands. While shown it covers the editor and any
 // key/click closes it.
@@ -1857,7 +1865,11 @@ static void handlePrefix(bool ctrl) {
             // handleInput()/handleMinibuffer(), by which point GLFW may still
             // have queued a char event for this same keypress; swallow it so
             // it isn't typed into the buffer or a prompt on that later frame.
+            // That event can also arrive a frame or two late in the first
+            // place (async IME commit), after this drain already ran and
+            // found nothing -- swallow_char_frames keeps catching it.
             while (GetCharPressed() != 0) {}
+            swallow_char_frames = 3;
             return;
         }
     }
@@ -2233,6 +2245,10 @@ int main(int argc, char **argv) {
     while (running) {
         shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+        if (swallow_char_frames > 0) {
+            swallow_char_frames--;
+            while (GetCharPressed() != 0) {}
+        }
         // C-m toggles modal (command) mode: bare keys run the Ctrl-key actions
         // and typing is suppressed (see handleInput). Ignored while a minibuffer
         // prompt is open so 'm' types normally there; swallow the toggling key so
@@ -2241,6 +2257,7 @@ int main(int argc, char **argv) {
             modal = !modal;
             echo(modal ? "Modal ON (m/Esc to exit)" : "Modal OFF");
             while (GetCharPressed() != 0) {}
+            swallow_char_frames = 3;
         }
 
         // ---- layout metrics (two bottom lines reserved: status + minibuffer) ----
