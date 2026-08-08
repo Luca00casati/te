@@ -4,11 +4,9 @@
 
 #include "raylib.h"
 
-enum {
-    CFG_WINDOW_WIDTH = 960,
-    CFG_WINDOW_HEIGHT = 640,
-    CFG_TARGET_FPS = 60,
-};
+
+#define CFG_TARGET_FPS 60
+
 #define CFG_WINDOW_TITLE "te"
 
 // Glyph height in pixels. UnifontEX is a 16 px bitmap design, so multiples

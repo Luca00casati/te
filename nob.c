@@ -5,6 +5,7 @@
 //
 //   cc -o nob nob.c && ./nob        # build ./te
 //   ./nob run [args...]             # build, then run ./te
+//   ./nob test                      # build, then run the test suite
 #define NOB_IMPLEMENTATION
 #include "nob.h"
 
@@ -57,6 +58,63 @@ static bool build_te(void) {
     return nob_cmd_run_sync_and_reset(&cmd);
 }
 
+// tests/unit_te.c #includes src/main.c directly to reach its static state
+// and functions (see the comment at the top of that file), so it needs the
+// same libraries as `te` itself, plus everything main.c depends on as
+// rebuild inputs.
+static bool build_unit_test(void) {
+    const char *deps[] = { "src/main.c", "src/config.h", "src/binding.h", "src/glyphs.h" };
+    if (!compile_object("tests/unit_te.c", "build/unit_te.o", deps, NOB_ARRAY_LEN(deps))) return false;
+
+    const char *objs[] = { "build/unit_te.o", "build/glyphs.o" };
+    int rebuild = nob_needs_rebuild("build/unit_te", objs, NOB_ARRAY_LEN(objs));
+    if (rebuild < 0) return false;
+    if (!rebuild) return true;
+
+    nob_log(NOB_INFO, "linking build/unit_te");
+    Nob_Cmd cmd = { 0 };
+    nob_cc(&cmd);
+    nob_cmd_append(&cmd, "build/unit_te.o", "build/glyphs.o", "-lraylib", "-lpcre2-8");
+    append_raylib_system_libs(&cmd);
+    nob_cc_output(&cmd, "build/unit_te");
+    return nob_cmd_run_sync_and_reset(&cmd);
+}
+
+// tests/cli_te.c only drives the compiled `te` binary as a subprocess, so it
+// needs no extra libraries.
+static bool build_cli_test(void) {
+    if (!compile_object("tests/cli_te.c", "build/cli_te.o", NULL, 0)) return false;
+
+    const char *objs[] = { "build/cli_te.o" };
+    int rebuild = nob_needs_rebuild("build/cli_te", objs, NOB_ARRAY_LEN(objs));
+    if (rebuild < 0) return false;
+    if (!rebuild) return true;
+
+    nob_log(NOB_INFO, "linking build/cli_te");
+    Nob_Cmd cmd = { 0 };
+    nob_cc(&cmd);
+    nob_cmd_append(&cmd, "build/cli_te.o");
+    nob_cc_output(&cmd, "build/cli_te");
+    return nob_cmd_run_sync_and_reset(&cmd);
+}
+
+static bool run_tests(void) {
+    if (!build_unit_test()) return false;
+    if (!build_cli_test()) return false;
+
+    nob_log(NOB_INFO, "running build/unit_te");
+    Nob_Cmd cmd = { 0 };
+    nob_cmd_append(&cmd, "build/unit_te");
+    bool unit_ok = nob_cmd_run_sync_and_reset(&cmd);
+
+    nob_log(NOB_INFO, "running build/cli_te");
+    cmd = (Nob_Cmd){ 0 };
+    nob_cmd_append(&cmd, "build/cli_te", "te");
+    bool cli_ok = nob_cmd_run_sync_and_reset(&cmd);
+
+    return unit_ok && cli_ok;
+}
+
 int main(int argc, char **argv) {
     NOB_GO_REBUILD_URSELF(argc, argv);
 
@@ -64,12 +122,20 @@ int main(int argc, char **argv) {
     (void)program;
 
     bool do_run = false;
+    bool do_test = false;
     if (argc > 0 && strcmp(argv[0], "run") == 0) {
         do_run = true;
+        nob_shift_args(&argc, &argv);
+    } else if (argc > 0 && strcmp(argv[0], "test") == 0) {
+        do_test = true;
         nob_shift_args(&argc, &argv);
     }
 
     if (!build_te()) return 1;
+
+    if (do_test) {
+        if (!run_tests()) return 1;
+    }
 
     if (do_run) {
         Nob_Cmd cmd = { 0 };

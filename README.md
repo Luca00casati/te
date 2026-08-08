@@ -143,6 +143,23 @@ self-rebuilds when it changes; there's no separate build-system binary to
 install. It's currently Linux-only — see `nob.c` for where per-OS link steps
 would go to support macOS/Windows.
 
+## Testing
+
+```sh
+./nob test
+```
+
+Two suites, both under `tests/`:
+
+- **`unit_te.c`** — white-box tests of the buffer/undo/search/UTF-8 logic.
+  Since everything in `main.c` is `static` with no header, it `#include`s
+  `src/main.c` directly (with `main()` renamed out of the way) to reach those
+  functions; nothing here opens a window.
+- **`cli_te.c`** — black-box tests that run the compiled `te` binary as a
+  subprocess against `te --regex <pattern> [in] [out]`, the headless mode
+  that exits before any window is created, checking stdout/exit codes/file
+  output.
+
 ## How it works
 
 - `src/main.c` — the editor itself: a flat 1 MiB text buffer with a caret and

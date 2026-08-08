@@ -2181,8 +2181,14 @@ int main(int argc, char **argv) {
     }
     buildFontCodepoints();
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-    InitWindow(CFG_WINDOW_WIDTH, CFG_WINDOW_HEIGHT, CFG_WINDOW_TITLE);
+    // A window has to exist before the monitor can be queried, so open a
+    // hidden placeholder, size it to half the monitor's resolution, then
+    // reveal it -- the user never sees the placeholder size.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN);
+    InitWindow(1, 1, CFG_WINDOW_TITLE);
+    int monitor = GetCurrentMonitor();
+    SetWindowSize(GetMonitorWidth(monitor) / 2, GetMonitorHeight(monitor) / 2);
+    ClearWindowState(FLAG_WINDOW_HIDDEN);
     SetTargetFPS(CFG_TARGET_FPS);
     SetExitKey(0); // ESC is "cancel", not "quit"
 
