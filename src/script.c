@@ -1,6 +1,6 @@
 // Lua integration -- see script.h. Registers a `te` table (te.action,
-// te.echo, te.insert, te.text, te.cursor, te.set_cursor, te.bind) and loads
-// it into an optional user init.lua at startup.
+// te.echo, te.insert, te.text, te.cursor, te.set_cursor, te.bind,
+// te.bind_leader) and loads it from an optional user init.lua at startup.
 #include "script.h"
 
 #include <ctype.h>
@@ -18,8 +18,9 @@
 
 static lua_State *L = NULL;
 
-// A key bound via te.bind(): either an existing named action (looked up in
-// COMMANDS, same as a typed command) or a Lua function held in the registry.
+// A key bound via te.bind()/te.bind_leader(): either an existing named
+// action (looked up in COMMANDS, same as a typed command) or a Lua function
+// held in the registry.
 typedef enum { SB_ACTION, SB_FUNCTION } ScriptBindingKind;
 typedef struct {
     int key;
@@ -29,9 +30,24 @@ typedef struct {
     int fn_ref;      // when kind == SB_FUNCTION (LUA_REGISTRYINDEX ref)
 } ScriptBinding;
 
-static ScriptBinding *bindings = NULL;
-static size_t bindings_count = 0;
-static size_t bindings_cap = 0;
+typedef struct {
+    ScriptBinding *items;
+    size_t count, cap;
+} ScriptBindingList;
+
+// Mirrors the C side's two tables: top_bindings parallels BINDINGS (checked
+// in handleInput), leader_bindings parallels PREFIX_BINDINGS (checked in
+// handlePrefix, once the leader is armed).
+static ScriptBindingList top_bindings = { 0 };
+static ScriptBindingList leader_bindings = { 0 };
+
+static void addBinding(ScriptBindingList *list, ScriptBinding sb) {
+    if (list->count == list->cap) {
+        list->cap = list->cap ? list->cap * 2 : 8;
+        list->items = realloc(list->items, list->cap * sizeof(ScriptBinding));
+    }
+    list->items[list->count++] = sb;
+}
 
 static void reportError(const char *prefix) {
     const char *msg = lua_tostring(L, -1);
@@ -115,20 +131,23 @@ static int l_set_cursor(lua_State *l) {
     return 0;
 }
 
-static int l_bind(lua_State *l) {
+// Shared arg parsing for te.bind/te.bind_leader: (key_name, mod_name,
+// action_name_or_function) at stack slots 1-3. Errors longjmp out via
+// luaL_error, so a caller only sees this return once it has succeeded.
+static ScriptBinding parseBindArgs(lua_State *l, const char *fn_name) {
     const char *key_name = luaL_checkstring(l, 1);
     const char *mod_name = luaL_checkstring(l, 2);
     luaL_checkany(l, 3);
 
     int key = parseKeyName(key_name);
-    if (key < 0) return luaL_error(l, "te.bind: unknown key '%s'", key_name);
+    if (key < 0) luaL_error(l, "%s: unknown key '%s'", fn_name, key_name);
     Mod mod;
-    if (!parseModName(mod_name, &mod)) return luaL_error(l, "te.bind: unknown mods '%s'", mod_name);
+    if (!parseModName(mod_name, &mod)) luaL_error(l, "%s: unknown mods '%s'", fn_name, mod_name);
 
     ScriptBinding sb = { .key = key, .mod = mod };
     if (lua_isstring(l, 3)) {
         if (!lookupAction(lua_tostring(l, 3), &sb.action)) {
-            return luaL_error(l, "te.bind: unknown action '%s'", lua_tostring(l, 3));
+            luaL_error(l, "%s: unknown action '%s'", fn_name, lua_tostring(l, 3));
         }
         sb.kind = SB_ACTION;
     } else if (lua_isfunction(l, 3)) {
@@ -136,14 +155,18 @@ static int l_bind(lua_State *l) {
         sb.kind = SB_FUNCTION;
         sb.fn_ref = luaL_ref(l, LUA_REGISTRYINDEX);
     } else {
-        return luaL_error(l, "te.bind: handler must be an action name or a function");
+        luaL_error(l, "%s: handler must be an action name or a function", fn_name);
     }
+    return sb;
+}
 
-    if (bindings_count == bindings_cap) {
-        bindings_cap = bindings_cap ? bindings_cap * 2 : 8;
-        bindings = realloc(bindings, bindings_cap * sizeof(ScriptBinding));
-    }
-    bindings[bindings_count++] = sb;
+static int l_bind(lua_State *l) {
+    addBinding(&top_bindings, parseBindArgs(l, "te.bind"));
+    return 0;
+}
+
+static int l_bind_leader(lua_State *l) {
+    addBinding(&leader_bindings, parseBindArgs(l, "te.bind_leader"));
     return 0;
 }
 
@@ -155,6 +178,7 @@ static const luaL_Reg TE_FUNCS[] = {
     { "cursor", l_cursor },
     { "set_cursor", l_set_cursor },
     { "bind", l_bind },
+    { "bind_leader", l_bind_leader },
     { NULL, NULL },
 };
 
@@ -195,21 +219,37 @@ void scriptInitFromFile(const char *path) {
     scriptLoadFile(path);
 }
 
+static void freeBindingList(ScriptBindingList *list) {
+    free(list->items);
+    *list = (ScriptBindingList){ 0 };
+}
+
 void scriptShutdown(void) {
     if (L) {
         lua_close(L);
         L = NULL;
     }
-    free(bindings);
-    bindings = NULL;
-    bindings_count = 0;
-    bindings_cap = 0;
+    freeBindingList(&top_bindings);
+    freeBindingList(&leader_bindings);
+}
+
+// Runs a matched binding's handler: an action via `apply` (editorRunAction
+// for a top-level key so repeat-count applies, editorApplyAction for a
+// leader chord so it fires exactly once, matching the native tables), or a
+// Lua function via pcall, with any error echoed rather than fatal.
+static void invokeBinding(const ScriptBinding *b, void (*apply)(Action)) {
+    if (b->kind == SB_ACTION) {
+        apply(b->action);
+    } else {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, b->fn_ref);
+        if (lua_pcall(L, 0, 0, 0) != LUA_OK) reportError("lua error");
+    }
 }
 
 bool scriptHandleKey(bool cmd, bool shift) {
     if (!L) return false;
-    for (size_t i = 0; i < bindings_count; i++) {
-        ScriptBinding *b = &bindings[i];
+    for (size_t i = 0; i < top_bindings.count; i++) {
+        ScriptBinding *b = &top_bindings.items[i];
         bool mod_ok;
         switch (b->mod) {
             case MOD_ANY: mod_ok = true; break;
@@ -219,13 +259,29 @@ bool scriptHandleKey(bool cmd, bool shift) {
         }
         if (!mod_ok) continue;
         if (!(IsKeyPressed(b->key) || IsKeyPressedRepeat(b->key))) continue;
+        invokeBinding(b, editorRunAction);
+        return true;
+    }
+    return false;
+}
 
-        if (b->kind == SB_ACTION) {
-            editorRunAction(b->action);
-        } else {
-            lua_rawgeti(L, LUA_REGISTRYINDEX, b->fn_ref);
-            if (lua_pcall(L, 0, 0, 0) != LUA_OK) reportError("lua error");
+// Mirrors PREFIX_BINDINGS matching in handlePrefix: Ctrl is optional (a
+// chord fires whether or not Ctrl is still held down), only Shift narrows
+// MOD_CTRL/MOD_CTRL_SHIFT, and a chord never auto-repeats.
+bool scriptHandlePrefixKey(bool shift) {
+    if (!L) return false;
+    for (size_t i = 0; i < leader_bindings.count; i++) {
+        ScriptBinding *b = &leader_bindings.items[i];
+        bool mod_ok;
+        switch (b->mod) {
+            case MOD_ANY: mod_ok = true; break;
+            case MOD_CTRL: mod_ok = !shift; break;
+            case MOD_CTRL_SHIFT: mod_ok = shift; break;
+            default: mod_ok = false; break;
         }
+        if (!mod_ok) continue;
+        if (!IsKeyPressed(b->key)) continue;
+        invokeBinding(b, editorApplyAction);
         return true;
     }
     return false;

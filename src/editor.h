@@ -7,7 +7,8 @@
 #include <stddef.h>
 #include "binding.h"
 
-void editorRunAction(Action action);
+void editorRunAction(Action action);   // repeat-count aware, like a typed key
+void editorApplyAction(Action action); // runs once, like a leader chord
 void editorEcho(const char *msg);
 void editorInsertText(const unsigned char *bytes, size_t n);
 const unsigned char *editorGetText(size_t *out_len);

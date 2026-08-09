@@ -128,13 +128,14 @@ status line instead of stopping `te` from starting. See
 | `te.insert(text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
 | `te.text()` | The whole buffer, as a string |
 | `te.cursor()` / `te.set_cursor(pos)` | Get/set the cursor as a byte offset |
-| `te.bind(key, mods, handler)` | Bind a key to a Lua function or an existing action name |
+| `te.bind(key, mods, handler)` | Bind a top-level key to a Lua function or an existing action name |
+| `te.bind_leader(key, mods, handler)` | Same, but as a leader chord (after the double-Ctrl-tap leader) |
 
 `key` is a single-character string (`"s"`, `"3"`) or one of `space`, `enter`,
 `tab`, `backspace`, `delete`, `escape`. `mods` is `any`, `ctrl`, or
-`ctrl-shift`. Script bindings are checked before the built-in `BINDINGS`
-table, so they can override a default; a Lua error inside a bound function is
-echoed rather than crashing `te`.
+`ctrl-shift`. Script bindings are checked before the built-in `BINDINGS`/
+`PREFIX_BINDINGS` tables, so they can override a default; a Lua error inside
+a bound function is echoed rather than crashing `te`.
 
 ## Dependencies
 

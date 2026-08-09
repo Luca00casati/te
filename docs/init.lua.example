@@ -33,4 +33,10 @@ te.bind("y", "ctrl-shift", function()
     end
 end)
 
+-- te.bind_leader(key, mods, handler) is the same idea for leader chords
+-- (leader = double-tap Ctrl, per the README): "leader d" inserts today's date.
+te.bind_leader("d", "any", function()
+    te.insert(os.date("%Y-%m-%d"))
+end)
+
 te.echo("init.lua loaded")

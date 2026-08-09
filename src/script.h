@@ -17,10 +17,14 @@ void scriptInitFromFile(const char *path);
 
 void scriptShutdown(void);
 
-// Checks script-registered key bindings against this frame's input and runs
-// the first match. `cmd` mirrors handleInput's ctrl-or-modal flag; `shift`
-// is the current Shift state. Returns true if a binding matched and ran,
-// so the caller can skip the built-in BINDINGS table for this key.
+// Checks script-registered key bindings (te.bind) against this frame's
+// input and runs the first match. `cmd` mirrors handleInput's ctrl-or-modal
+// flag; `shift` is the current Shift state. Returns true if a binding
+// matched and ran, so the caller can skip the built-in BINDINGS table.
 bool scriptHandleKey(bool cmd, bool shift);
+
+// Same idea, for leader-chord bindings (te.bind_leader) once the prefix is
+// armed. Mirrors PREFIX_BINDINGS: Ctrl is optional, only Shift is checked.
+bool scriptHandlePrefixKey(bool shift);
 
 #endif // TE_SCRIPT_H

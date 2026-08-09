@@ -1842,6 +1842,18 @@ static void handlePrefix(bool ctrl) {
         echo("Quit");
         return;
     }
+    // Script-registered leader chords (te.bind_leader, from init.lua) get
+    // first look, so a user script can override a built-in chord or even the
+    // help overlays below; if none match, fall through to the built-ins.
+    if (scriptHandlePrefixKey(shift)) {
+        prefix_pending = false;
+        // See the matching drain below: swallow a same-key char event GLFW
+        // may still have queued (or deliver a frame or two late under async
+        // IME) so it isn't typed into the buffer or a prompt afterward.
+        while (GetCharPressed() != 0) {}
+        swallow_char_frames = 3;
+        return;
+    }
     // leader n -> key/navigation help overlay
     if (IsKeyPressed(KEY_N)) {
         prefix_pending = false;
@@ -2193,6 +2205,7 @@ static bool loadFontFile(void) {
 
 // --- editor.h: the surface exposed to src/script.c (Lua integration) -----
 void editorRunAction(Action action) { runAction(action); }
+void editorApplyAction(Action action) { applyAction(action); }
 void editorEcho(const char *msg) { echo(msg); }
 void editorInsertText(const unsigned char *bytes, size_t n) { insertBytes(bytes, n); }
 const unsigned char *editorGetText(size_t *out_len) { *out_len = len; return text; }
