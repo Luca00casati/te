@@ -1759,14 +1759,7 @@ static void handleInput(bool ctrl, Metrics m) {
     if (!scriptHandleKey(cmd, shift)) {
         for (size_t bi = 0; bi < BINDINGS_COUNT; bi++) {
             const Binding *b = &BINDINGS[bi];
-            bool mod_ok;
-            switch (b->mod) {
-                case MOD_ANY: mod_ok = true; break;
-                case MOD_CTRL: mod_ok = cmd && !shift; break;
-                case MOD_CTRL_SHIFT: mod_ok = cmd && shift; break;
-                default: mod_ok = false; break;
-            }
-            if (!mod_ok) continue;
+            if (!modMatchesKey(b->mod, cmd, shift)) continue;
             // Modal mode is navigation-only: bare keys move the caret and nothing
             // else, so getting around stays fluid without exposing editing or
             // destructive commands. Real Ctrl still triggers everything.
@@ -1871,14 +1864,7 @@ static void handlePrefix(bool ctrl) {
     // chord path: leader <key>, with or without Ctrl
     for (size_t i = 0; i < PREFIX_BINDINGS_COUNT; i++) {
         const Binding *b = &PREFIX_BINDINGS[i];
-        bool mod_ok;
-        switch (b->mod) {
-            case MOD_ANY: mod_ok = true; break;
-            case MOD_CTRL: mod_ok = !shift; break; // Ctrl optional
-            case MOD_CTRL_SHIFT: mod_ok = shift; break;
-            default: mod_ok = false; break;
-        }
-        if (!mod_ok) continue;
+        if (!modMatchesChord(b->mod, shift)) continue;
         if (IsKeyPressed(b->key)) {
             prefix_pending = false;
             applyAction(b->action);

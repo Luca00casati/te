@@ -67,6 +67,31 @@ typedef enum {
     MOD_CTRL_SHIFT, // requires Ctrl+Shift held
 } Mod;
 
+// Shared by every table that matches a Binding's `mod` against live input:
+// the native BINDINGS/PREFIX_BINDINGS loops in main.c, and their
+// script-bound counterparts in script.c.
+//
+// modMatchesKey: a top-level key (handleInput/scriptHandleKey). `cmd` is
+// Ctrl-or-modal-mode; MOD_CTRL/MOD_CTRL_SHIFT both require it held.
+static inline bool modMatchesKey(Mod mod, bool cmd, bool shift) {
+    switch (mod) {
+        case MOD_ANY: return true;
+        case MOD_CTRL: return cmd && !shift;
+        case MOD_CTRL_SHIFT: return cmd && shift;
+        default: return false;
+    }
+}
+// modMatchesChord: a leader chord (handlePrefix/scriptHandlePrefixKey), once
+// the prefix is armed -- Ctrl is optional there, so only Shift narrows it.
+static inline bool modMatchesChord(Mod mod, bool shift) {
+    switch (mod) {
+        case MOD_ANY: return true;
+        case MOD_CTRL: return !shift;
+        case MOD_CTRL_SHIFT: return shift;
+        default: return false;
+    }
+}
+
 typedef struct {
     int key;
     Action action;

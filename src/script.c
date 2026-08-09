@@ -295,14 +295,7 @@ bool scriptHandleKey(bool cmd, bool shift) {
     if (!L) return false;
     for (size_t i = 0; i < top_bindings.count; i++) {
         ScriptBinding *b = &top_bindings.items[i];
-        bool mod_ok;
-        switch (b->mod) {
-            case MOD_ANY: mod_ok = true; break;
-            case MOD_CTRL: mod_ok = cmd && !shift; break;
-            case MOD_CTRL_SHIFT: mod_ok = cmd && shift; break;
-            default: mod_ok = false; break;
-        }
-        if (!mod_ok) continue;
+        if (!modMatchesKey(b->mod, cmd, shift)) continue;
         if (!(IsKeyPressed(b->key) || IsKeyPressedRepeat(b->key))) continue;
         invokeBinding(b, editorRunAction);
         return true;
@@ -317,14 +310,7 @@ bool scriptHandlePrefixKey(bool shift) {
     if (!L) return false;
     for (size_t i = 0; i < leader_bindings.count; i++) {
         ScriptBinding *b = &leader_bindings.items[i];
-        bool mod_ok;
-        switch (b->mod) {
-            case MOD_ANY: mod_ok = true; break;
-            case MOD_CTRL: mod_ok = !shift; break;
-            case MOD_CTRL_SHIFT: mod_ok = shift; break;
-            default: mod_ok = false; break;
-        }
-        if (!mod_ok) continue;
+        if (!modMatchesChord(b->mod, shift)) continue;
         if (!IsKeyPressed(b->key)) continue;
         invokeBinding(b, editorApplyAction);
         return true;
