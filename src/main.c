@@ -809,6 +809,7 @@ static void openPath(const char *path) {
     has_file = true;
     if (existed) echoFmt("Opened %s", filename);
     else echoFmt("(New file) %s", filename);
+    scriptRunHook("post-open");
 }
 static bool saveFile(void) {
     FILE *f = fopen(filename, "wb");
@@ -819,6 +820,7 @@ static bool saveFile(void) {
     freeHistory(); // the saved buffer is the new baseline; drop undo/redo history
     dirty = false;
     has_file = true;
+    scriptRunHook("post-save");
     return true;
 }
 static void saveCurrent(void) {
@@ -2248,6 +2250,10 @@ int main(int argc, char **argv) {
     float margin_y = CFG_MARGIN_Y;
     blink_base = GetTime();
 
+    // Loaded before the command-line file (if any) is opened, so an
+    // init.lua te.on("post-open", ...) hook also fires for it.
+    scriptInit();
+
     // Arguments (parsed after window init so echo works): an optional file to
     // open, and `--screenshot <frames> <path>`. (--regex is handled headlessly
     // before the window opens -- see grepMode.)
@@ -2268,8 +2274,6 @@ int main(int argc, char **argv) {
             openPath(arg);
         }
     }
-
-    scriptInit(); // load ~/.config/te/init.lua, if present
 
     static char line_tmp[8192];
     static char status_tmp[256];

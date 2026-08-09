@@ -130,6 +130,7 @@ status line instead of stopping `te` from starting. See
 | `te.cursor()` / `te.set_cursor(pos)` | Get/set the cursor as a byte offset |
 | `te.bind(key, mods, handler)` | Bind a top-level key to a Lua function or an existing action name |
 | `te.bind_leader(key, mods, handler)` | Same, but as a leader chord (after the double-Ctrl-tap leader) |
+| `te.on(event, fn)` | Run `fn` whenever `event` fires: `"post-save"` or `"post-open"` |
 
 `key` is a single-character string (`"s"`, `"3"`) or one of `space`, `enter`,
 `tab`, `backspace`, `delete`, `escape`. `mods` is `any`, `ctrl`, or
@@ -213,8 +214,10 @@ Two suites, both under `tests/`:
 - `src/script.c` — the Lua integration (see Scripting above). `src/editor.h`
   is the small explicit surface `main.c` exposes to it (run an action, echo,
   insert text, read/move the cursor) so script.c never reaches into
-  `main.c`'s static state directly; `handleInput` in `main.c` checks
-  script-registered bindings before the built-in `BINDINGS` table.
+  `main.c`'s static state directly; `handleInput`/`handlePrefix` in `main.c`
+  check script-registered bindings before the built-in `BINDINGS`/
+  `PREFIX_BINDINGS` tables, and `saveFile`/`openPath` call `scriptRunHook`
+  for `te.on` listeners.
 - `nob.c` compiles `src/main.c`, `src/glyphs.c`, and `src/script.c` with
   `cc -std=c11` and links against the system-installed raylib, libpcre2-8,
   and liblua5.4 (plain `-lraylib -lpcre2-8 -llua5.4`), plus the Linux desktop

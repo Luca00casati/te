@@ -1,6 +1,7 @@
 // Lua integration -- see script.h. Registers a `te` table (te.action,
 // te.echo, te.insert, te.text, te.cursor, te.set_cursor, te.bind,
-// te.bind_leader) and loads it from an optional user init.lua at startup.
+// te.bind_leader, te.on) and loads it from an optional user init.lua at
+// startup.
 #include "script.h"
 
 #include <ctype.h>
@@ -48,6 +49,16 @@ static void addBinding(ScriptBindingList *list, ScriptBinding sb) {
     }
     list->items[list->count++] = sb;
 }
+
+// A function registered via te.on(event, fn). Several handlers can share an
+// event name; scriptRunHook calls all of them, in registration order.
+typedef struct {
+    char event[32];
+    int fn_ref;
+} Hook;
+static Hook *hooks = NULL;
+static size_t hooks_count = 0;
+static size_t hooks_cap = 0;
 
 static void reportError(const char *prefix) {
     const char *msg = lua_tostring(L, -1);
@@ -170,6 +181,26 @@ static int l_bind_leader(lua_State *l) {
     return 0;
 }
 
+static int l_on(lua_State *l) {
+    const char *event = luaL_checkstring(l, 1);
+    luaL_checktype(l, 2, LUA_TFUNCTION);
+    if (strlen(event) >= sizeof(((Hook *)0)->event)) {
+        return luaL_error(l, "te.on: event name '%s' is too long", event);
+    }
+
+    lua_pushvalue(l, 2);
+    int ref = luaL_ref(l, LUA_REGISTRYINDEX);
+    if (hooks_count == hooks_cap) {
+        hooks_cap = hooks_cap ? hooks_cap * 2 : 8;
+        hooks = realloc(hooks, hooks_cap * sizeof(Hook));
+    }
+    Hook *h = &hooks[hooks_count++];
+    strncpy(h->event, event, sizeof(h->event) - 1);
+    h->event[sizeof(h->event) - 1] = 0;
+    h->fn_ref = ref;
+    return 0;
+}
+
 static const luaL_Reg TE_FUNCS[] = {
     { "action", l_action },
     { "echo", l_echo },
@@ -179,6 +210,7 @@ static const luaL_Reg TE_FUNCS[] = {
     { "set_cursor", l_set_cursor },
     { "bind", l_bind },
     { "bind_leader", l_bind_leader },
+    { "on", l_on },
     { NULL, NULL },
 };
 
@@ -231,6 +263,19 @@ void scriptShutdown(void) {
     }
     freeBindingList(&top_bindings);
     freeBindingList(&leader_bindings);
+    free(hooks);
+    hooks = NULL;
+    hooks_count = 0;
+    hooks_cap = 0;
+}
+
+void scriptRunHook(const char *name) {
+    if (!L) return;
+    for (size_t i = 0; i < hooks_count; i++) {
+        if (strcmp(hooks[i].event, name) != 0) continue;
+        lua_rawgeti(L, LUA_REGISTRYINDEX, hooks[i].fn_ref);
+        if (lua_pcall(L, 0, 0, 0) != LUA_OK) reportError("lua error");
+    }
 }
 
 // Runs a matched binding's handler: an action via `apply` (editorRunAction

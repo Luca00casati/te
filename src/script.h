@@ -27,4 +27,9 @@ bool scriptHandleKey(bool cmd, bool shift);
 // armed. Mirrors PREFIX_BINDINGS: Ctrl is optional, only Shift is checked.
 bool scriptHandlePrefixKey(bool shift);
 
+// Runs every Lua function registered via te.on(name, fn) for this event
+// name, in registration order. A no-op if init.lua registered none. Errors
+// are echoed, not fatal. Current events: "post-save", "post-open".
+void scriptRunHook(const char *name);
+
 #endif // TE_SCRIPT_H

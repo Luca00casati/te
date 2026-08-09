@@ -434,6 +434,29 @@ static void test_script_error_is_echoed_not_fatal(void) {
     scriptShutdown();
 }
 
+static void test_script_hooks_fire_on_save_and_open(void) {
+    reset();
+    scriptInitFromFile("tests/fixtures/init_hooks.lua");
+
+    char path[] = "/tmp/te_unit_test_hooks_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    close(fd);
+
+    setText("hook test");
+    setFilename(path, strlen(path));
+    CHECK(saveFile());
+    CHECK(echo_len == strlen("post-save fired"));
+    CHECK(memcmp(echo_buf, "post-save fired", echo_len) == 0);
+
+    openPath(path); // openPath's own "Opened ..." echo is overwritten by the hook
+    CHECK(echo_len == strlen("post-open fired"));
+    CHECK(memcmp(echo_buf, "post-open fired", echo_len) == 0);
+
+    unlink(path);
+    scriptShutdown();
+}
+
 int main(void) {
     RUN(test_utf8_roundtrip);
     RUN(test_utf8_malformed_falls_back);
@@ -476,6 +499,7 @@ int main(void) {
 
     RUN(test_script_loads_and_runs_api);
     RUN(test_script_error_is_echoed_not_fatal);
+    RUN(test_script_hooks_fire_on_save_and_open);
 
     fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
