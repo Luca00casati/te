@@ -413,6 +413,27 @@ static void test_read_missing_file(void) {
     CHECK(len == 0); // readFileInto resets len on failure
 }
 
+// --- Lua scripting (src/script.c) ---------------------------------------
+static void test_script_loads_and_runs_api(void) {
+    reset();
+    scriptInitFromFile("tests/fixtures/init_test.lua");
+    // The fixture's own assert()s drive most of the checking; a failure
+    // there would have replaced this echo with a "lua error: ..." message
+    // instead of leaving the buffer/echo state below.
+    CHECK(textEquals(""));
+    CHECK(echo_len == strlen("hello from init.lua"));
+    CHECK(memcmp(echo_buf, "hello from init.lua", echo_len) == 0);
+    scriptShutdown();
+}
+
+static void test_script_error_is_echoed_not_fatal(void) {
+    reset();
+    scriptInitFromFile("tests/fixtures/init_test_bad.lua");
+    CHECK(echo_len >= 9);
+    CHECK(memcmp(echo_buf, "lua error", 9) == 0);
+    scriptShutdown();
+}
+
 int main(void) {
     RUN(test_utf8_roundtrip);
     RUN(test_utf8_malformed_falls_back);
@@ -452,6 +473,9 @@ int main(void) {
 
     RUN(test_save_and_read_roundtrip);
     RUN(test_read_missing_file);
+
+    RUN(test_script_loads_and_runs_api);
+    RUN(test_script_error_is_echoed_not_fatal);
 
     fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

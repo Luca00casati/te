@@ -3,8 +3,8 @@
 A minimal GUI text editor, currently built and tested on **Linux** (the code
 is portable C11, so other platforms are mainly a matter of adding their link
 steps to `nob.c`). Single window, monospace grid, load/edit/save a plain-text
-file. Built with [raylib](https://www.raylib.com/) and PCRE2 (both linked
-from the system install), using
+file. Built with [raylib](https://www.raylib.com/), PCRE2, and Lua (all
+linked from the system install), using
 [nob](https://github.com/tsoding/nob.h) as the build system.
 
 Text is rendered with **[UnifontEX](https://github.com/stgiga/UnifontEX)** — a
@@ -112,6 +112,30 @@ cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
 ./te notes.txt --screenshot 10 out.png
 ```
 
+## Scripting
+
+`te` loads an optional Lua init script at startup —
+`$XDG_CONFIG_HOME/te/init.lua`, falling back to `~/.config/te/init.lua` —
+the way Emacs loads `.emacs` or Vim loads `init.vim`. A missing file is fine
+(te just uses its `src/binding.h` defaults); a script error is echoed on the
+status line instead of stopping `te` from starting. See
+`docs/init.lua.example` for a starting point.
+
+| Lua | Does |
+| --- | --- |
+| `te.action(name)` | Run a named command (anything in `COMMANDS`, `src/binding.h`) |
+| `te.echo(msg)` | Write a message to the status line |
+| `te.insert(text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
+| `te.text()` | The whole buffer, as a string |
+| `te.cursor()` / `te.set_cursor(pos)` | Get/set the cursor as a byte offset |
+| `te.bind(key, mods, handler)` | Bind a key to a Lua function or an existing action name |
+
+`key` is a single-character string (`"s"`, `"3"`) or one of `space`, `enter`,
+`tab`, `backspace`, `delete`, `escape`. `mods` is `any`, `ctrl`, or
+`ctrl-shift`. Script bindings are checked before the built-in `BINDINGS`
+table, so they can override a default; a Lua error inside a bound function is
+echoed rather than crashing `te`.
+
 ## Dependencies
 
 Linux, X11/OpenGL. Install:
@@ -121,6 +145,9 @@ Linux, X11/OpenGL. Install:
   distro's dev packages if it has them — e.g. `libpcre2-dev` on
   Debian/Ubuntu). `nob.c` links them as plain `-lraylib -lpcre2-8`; if yours
   land somewhere nonstandard, add the matching `-I`/`-L` flags there.
+- **Lua 5.4** — `liblua5.4-dev` on Debian/Ubuntu (`sudo apt install
+  liblua5.4-dev`). `nob.c` compiles against `/usr/include/lua5.4` and links
+  `-llua5.4`; adjust both if your distro installs Lua elsewhere.
 - The system libraries raylib's static archive needs at link time:
   ```sh
   sudo apt install \
@@ -151,10 +178,11 @@ would go to support macOS/Windows.
 
 Two suites, both under `tests/`:
 
-- **`unit_te.c`** — white-box tests of the buffer/undo/search/UTF-8 logic.
-  Since everything in `main.c` is `static` with no header, it `#include`s
-  `src/main.c` directly (with `main()` renamed out of the way) to reach those
-  functions; nothing here opens a window.
+- **`unit_te.c`** — white-box tests of the buffer/undo/search/UTF-8 logic,
+  plus the Lua `te.*` API (`tests/fixtures/init_test*.lua`). Since everything
+  in `main.c` is `static` with no header, it `#include`s `src/main.c`
+  directly (with `main()` renamed out of the way) to reach those functions;
+  nothing here opens a window.
 - **`cli_te.c`** — black-box tests that run the compiled `te` binary as a
   subprocess against `te --regex <pattern> [in] [out]`, the headless mode
   that exits before any window is created, checking stdout/exit codes/file
@@ -181,10 +209,16 @@ Two suites, both under `tests/`:
 - `src/binding.h` — the key → action map. The leader is armed by a double-tap
   of Ctrl (`detectCtrlTaps` in `main.c`); edit `BINDINGS`/`PREFIX_BINDINGS`/
   `COMMANDS` to rebind.
-- `nob.c` compiles `src/main.c` and `src/glyphs.c` with `cc -std=c11` and links
-  against the system-installed raylib and libpcre2-8 (plain `-lraylib
-  -lpcre2-8`), plus the Linux desktop system libraries raylib's GLFW backend
-  needs, into `./te` in the project root.
+- `src/script.c` — the Lua integration (see Scripting above). `src/editor.h`
+  is the small explicit surface `main.c` exposes to it (run an action, echo,
+  insert text, read/move the cursor) so script.c never reaches into
+  `main.c`'s static state directly; `handleInput` in `main.c` checks
+  script-registered bindings before the built-in `BINDINGS` table.
+- `nob.c` compiles `src/main.c`, `src/glyphs.c`, and `src/script.c` with
+  `cc -std=c11` and links against the system-installed raylib, libpcre2-8,
+  and liblua5.4 (plain `-lraylib -lpcre2-8 -llua5.4`), plus the Linux desktop
+  system libraries raylib's GLFW backend needs, into `./te` in the project
+  root.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.
@@ -197,6 +231,7 @@ Third-party components keep their own licenses:
 
 - **raylib** (linked from the system install) — zlib/libpng license.
 - **PCRE2** (linked from the system install) — BSD license.
+- **Lua** (linked from the system install) — MIT license.
 - **UnifontEX** (bundled as `UnifontExMono.ttf`) — derived from GNU Unifont;
   distributed under the SIL Open Font License 1.1 and the GNU GPLv2 with the
   font-embedding exception.

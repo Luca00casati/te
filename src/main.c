@@ -15,6 +15,8 @@
 #include "config.h"
 #include "binding.h"
 #include "glyphs.h"
+#include "editor.h"
+#include "script.h"
 
 // Text buffer capacity (the buffer is a fixed array this big).
 #define TEXT_CAP CFG_MAX_FILE_BYTES
@@ -1749,26 +1751,31 @@ static void handleInput(bool ctrl, Metrics m) {
             }
         }
     }
-    for (size_t bi = 0; bi < BINDINGS_COUNT; bi++) {
-        const Binding *b = &BINDINGS[bi];
-        bool mod_ok;
-        switch (b->mod) {
-            case MOD_ANY: mod_ok = true; break;
-            case MOD_CTRL: mod_ok = cmd && !shift; break;
-            case MOD_CTRL_SHIFT: mod_ok = cmd && shift; break;
-            default: mod_ok = false; break;
-        }
-        if (!mod_ok) continue;
-        // Modal mode is navigation-only: bare keys move the caret and nothing
-        // else, so getting around stays fluid without exposing editing or
-        // destructive commands. Real Ctrl still triggers everything.
-        if (modal && !ctrl && !isNavAction(b->action)) continue;
-        bool hit = b->repeat ? pressed(b->key) : IsKeyPressed(b->key);
-        if (hit) {
-            // Extend the selection when the mark is active, or on a plain
-            // Shift+navigation key (not when Shift is part of a chord).
-            sel_extend = mark_active || (shift && b->mod == MOD_ANY);
-            runAction(b->action);
+    // Script-registered bindings (te.bind, from init.lua) get first look, so
+    // a user script can override a built-in; if none match, fall through to
+    // the built-in BINDINGS table exactly as before.
+    if (!scriptHandleKey(cmd, shift)) {
+        for (size_t bi = 0; bi < BINDINGS_COUNT; bi++) {
+            const Binding *b = &BINDINGS[bi];
+            bool mod_ok;
+            switch (b->mod) {
+                case MOD_ANY: mod_ok = true; break;
+                case MOD_CTRL: mod_ok = cmd && !shift; break;
+                case MOD_CTRL_SHIFT: mod_ok = cmd && shift; break;
+                default: mod_ok = false; break;
+            }
+            if (!mod_ok) continue;
+            // Modal mode is navigation-only: bare keys move the caret and nothing
+            // else, so getting around stays fluid without exposing editing or
+            // destructive commands. Real Ctrl still triggers everything.
+            if (modal && !ctrl && !isNavAction(b->action)) continue;
+            bool hit = b->repeat ? pressed(b->key) : IsKeyPressed(b->key);
+            if (hit) {
+                // Extend the selection when the mark is active, or on a plain
+                // Shift+navigation key (not when Shift is part of a chord).
+                sel_extend = mark_active || (shift && b->mod == MOD_ANY);
+                runAction(b->action);
+            }
         }
     }
     float wheel = GetMouseWheelMove();
@@ -2184,6 +2191,18 @@ static bool loadFontFile(void) {
     return true;
 }
 
+// --- editor.h: the surface exposed to src/script.c (Lua integration) -----
+void editorRunAction(Action action) { runAction(action); }
+void editorEcho(const char *msg) { echo(msg); }
+void editorInsertText(const unsigned char *bytes, size_t n) { insertBytes(bytes, n); }
+const unsigned char *editorGetText(size_t *out_len) { *out_len = len; return text; }
+size_t editorGetCursor(void) { return cursor; }
+void editorSetCursor(size_t pos) {
+    if (pos > len) pos = len;
+    cursor = pos;
+    anchor = pos;
+}
+
 int main(int argc, char **argv) {
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits
 
@@ -2236,6 +2255,8 @@ int main(int argc, char **argv) {
             openPath(arg);
         }
     }
+
+    scriptInit(); // load ~/.config/te/init.lua, if present
 
     static char line_tmp[8192];
     static char status_tmp[256];
@@ -2493,6 +2514,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    scriptShutdown();
     freeHistory();
     glyphs_deinit();
     UnloadFont(font);
