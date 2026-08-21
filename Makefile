@@ -7,7 +7,7 @@
 #   make clean
 
 CC ?= cc
-CFLAGS := -std=c11 -Wall -Wextra -Ibuild -MMD -MP
+CFLAGS := -std=c11 -Wall -Wextra -MMD -MP
 
 SDL_CFLAGS   := $(shell pkg-config --cflags sdl2)
 SDL_LIBS     := $(shell pkg-config --libs sdl2)
@@ -26,15 +26,12 @@ all: te
 build:
 	mkdir -p build
 
-# Generates build/<name>_pl.h from src/<name>.pl: a byte array
-# (<NAME>_PL_SRC) plus its length, baking the engine's Prolog-defined
-# standard library and te's own default bindings/undo history into the
-# binary at build time -- unlike the bundled font, neither is a file `te`
-# needs to find on disk next to the executable at runtime.
-build/%_pl.h: src/%.pl tools/gen_pl_header.sh | build
-	@echo "Generating $@"
-	@symbol=$$(printf '%s' $* | tr 'a-z' 'A-Z')_PL_SRC; \
-	./tools/gen_pl_header.sh $< $@ $$symbol
+# te's own src/*.pl files (bootstrap.pl, default_bindings.pl, and whatever
+# else is under src/) are read from disk at startup, not baked into the
+# binary -- see script.c's resolvePlDir/scriptSetup. Nothing to generate
+# here; they just need to exist on disk next to the built `te` (or ./src
+# relative to the working directory, which is what the test binary in
+# build/ falls back to).
 
 build/main.o: src/main.c | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
@@ -45,13 +42,10 @@ build/glyphs.o: src/glyphs.c | build
 build/platform.o: src/platform.c | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
 
-# src/prolog.c #includes the generated build/bootstrap_pl.h.
-build/prolog.o: src/prolog.c build/bootstrap_pl.h | build
+build/prolog.o: src/prolog.c | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
 
-# src/script.c #includes the generated build/default_bindings_pl.h,
-# build/undo_history_pl.h, build/search_pl.h, and build/movement_pl.h.
-build/script.o: src/script.c build/default_bindings_pl.h build/undo_history_pl.h build/search_pl.h build/movement_pl.h | build
+build/script.o: src/script.c | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
 
 te: build/main.o build/glyphs.o build/platform.o build/script.o build/prolog.o

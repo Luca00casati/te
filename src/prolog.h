@@ -8,9 +8,12 @@
 // of character codes (bytes, not Unicode codepoints -- see
 // mkCodeList/getTextFlexible in prolog.c), not a distinct string type.
 // A library of list/control predicates (member/2, append/3, maplist/2-4,
-// forall/2, foldl/4, between/3, succ/2, ...) is bootstrapped as ordinary
-// Prolog clauses in prologCreate rather than hand-coded in C -- most of them
+// forall/2, foldl/4, between/3, succ/2, ...) is written as ordinary Prolog
+// clauses (src/bootstrap.pl) rather than hand-coded in C -- most of them
 // don't need anything a native C function can do that clauses can't.
+// prologCreate() no longer loads it automatically: it's the caller's job to
+// prologConsultFile/Buffer it in (script.c's scriptSetup does this by
+// finding src/bootstrap.pl on disk next to the running executable).
 // ISO-flavored, not a certified conformance suite.
 #ifndef TE_PROLOG_H
 #define TE_PROLOG_H
@@ -51,12 +54,6 @@ void prologRegisterNative(Prolog *pl, const char *name, int arity, PrologNative 
 // error handler; loading continues with the next clause rather than
 // aborting.
 void prologConsultFile(Prolog *pl, const char *path);
-
-// Same idea, from an in-memory buffer instead of a file -- e.g. content
-// baked into the binary at build time rather than read from disk (see
-// src/bootstrap.pl / src/default_bindings.pl and their generated headers).
-// `buf` need not be NUL-terminated; `len` is authoritative.
-void prologConsultBuffer(Prolog *pl, const char *buf, size_t len);
 
 // --- Query-arena scratch space --------------------------------------------
 // Everything a query allocates (parsed terms, fresh variables, clause

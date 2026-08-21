@@ -14,16 +14,20 @@
 #include "binding.h"
 
 // Creates the Prolog engine, registers the `te_*` native predicates, loads
+// te's own src/bootstrap.pl and every other core .pl file from disk (found
+// next to the running executable -- see script.c's resolvePlDir), then
 // $XDG_CONFIG_HOME/te/init.pl (falling back to $HOME/.config/te/init.pl),
-// then loads the built-in src/default_bindings.pl (baked into the binary --
-// see build/default_bindings_pl.h). A missing init.pl is not an error; a
-// script error is echoed to the status line but does not stop the editor
-// from starting.
-void scriptInit(void);
+// then src/default_bindings.pl. A missing init.pl is not an error (nor is a
+// missing/broken file among the other core ones); a script error is echoed
+// to the status line but does not stop the editor from starting. Returns
+// false only if src/bootstrap.pl itself -- the engine's own standard
+// library, which everything else leans on -- couldn't be found; the caller
+// should treat that as fatal, the same as a missing bundled font.
+bool scriptInit(void);
 
 // Same as scriptInit, but loads the given path instead of the default
 // config location, still followed by default_bindings.pl. For tests.
-void scriptInitFromFile(const char *path);
+bool scriptInitFromFile(const char *path);
 
 void scriptShutdown(void);
 

@@ -118,10 +118,10 @@ cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
 `te` loads an optional Prolog init script at startup —
 `$XDG_CONFIG_HOME/te/init.pl`, falling back to `~/.config/te/init.pl` —
 the way Emacs loads `.emacs` or Vim loads `init.vim` — **followed by te's
-own `src/default_bindings.pl`**, baked into the binary at build time. A
-missing init.pl is fine (te just uses its built-in defaults); a script
-error is echoed on the status line instead of stopping `te` from starting.
-See `docs/init.pl.example` for a starting point.
+own `src/default_bindings.pl`**, read from disk next to the executable (see
+"How it works" below). A missing init.pl is fine (te just uses its built-in
+defaults); a script error is echoed on the status line instead of stopping
+`te` from starting. See `docs/init.pl.example` for a starting point.
 
 Bindings, hooks, and commands are plain **facts and rules** — not just for
 `init.pl`, `te`'s own defaults are facts too (`src/default_bindings.pl`),
@@ -183,11 +183,11 @@ A list/control-predicate library — `member/2`, `memberchk/2`, `append/3`,
 startup rather than hand-coded in C: most of them don't need anything a
 native function can do that a recursive clause can't, so the engine
 dogfeeds its own unification/backtracking instead of duplicating that
-logic. The `Makefile` bakes it into the binary at build time
-(`build/bootstrap_pl.h`, generated from that file) rather than reading it
-from disk at runtime like the font — it's core engine behavior, not
-user-swappable content, so a missing/moved file shouldn't be a way to break
-it. ISO-flavored, not a certified conformance suite.
+logic. Read from disk at startup next to the running executable, the same
+way the bundled font is (see "How it works" below) — a missing
+`src/bootstrap.pl` is treated as fatal, the same as a missing font, since
+it's core engine behavior everything else leans on, not user-swappable
+content. ISO-flavored, not a certified conformance suite.
 
 ## Dependencies
 
@@ -260,6 +260,8 @@ Two suites, both under `tests/`:
 - **The font is loaded from disk at startup**, from the same directory as the
   running executable. `UnifontExMono.ttf` is bundled in the repo rather than
   embedded into the binary; `te` exits with a clear error if it can't find it.
+  Every `src/*.pl` file (below) is loaded the same way, for the same reason:
+  adding or editing one is just a file change, not a rebuild.
 - `src/config.h` — all the tunables (window size, font size, colors, tab,
   buffer capacity). Font size is 16 by default; multiples of 16 stay crisp.
 - `src/binding.h` — the `Action`/`Mod` enums every key ultimately resolves to
@@ -272,16 +274,14 @@ Two suites, both under `tests/`:
   built-in predicate library. Not editor-specific — doesn't know `te` exists.
 - `src/bootstrap.pl` — the engine's own standard library (`member/2`,
   `maplist/2-4`, `between/3`, `succ/2`, ...), written in Prolog rather than C
-  (see Scripting above). The `Makefile` turns it into `build/bootstrap_pl.h`
-  (a byte array baked into the binary, via `tools/gen_pl_header.sh`) before
-  compiling `src/prolog.c`, which consults it once at `prologCreate`.
+  (see Scripting above). `script.c`'s `scriptSetup` finds and consults it
+  once, right after `prologCreate` (which no longer loads any library on its
+  own) — see `resolvePlDir` below.
 - `src/default_bindings.pl` — te's own key bindings/leader chords/commands,
   as `key_binding`/`key_binding_once`/`leader_binding`/`command` facts (see
   Scripting above) — what used to be the static `BINDINGS`/`PREFIX_BINDINGS`/
-  `COMMANDS` tables in `src/binding.h`. The `Makefile` bakes it into
-  `build/default_bindings_pl.h`, the same way as `bootstrap.pl`;
-  `scriptInit`/`scriptInitFromFile` in `script.c` consult it right after the
-  user's `init.pl`.
+  `COMMANDS` tables in `src/binding.h`. `scriptInit`/`scriptInitFromFile` in
+  `script.c` consult it right after the user's `init.pl`.
 - `src/script.c` — the Prolog integration (registers `te_*` native
   predicates, loads `init.pl` then `default_bindings.pl`, and is the *sole*
   key/leader/command dispatch path — no native fallback table). `src/editor.h`
@@ -320,13 +320,17 @@ Two suites, both under `tests/`:
   libpcre2-8 (found via pkg-config; the Prolog engine adds no external
   dependency) into `./te` in the project root — SDL2 is a shared library, so
   its own transitive system dependencies resolve automatically at link time,
-  unlike raylib's old static archive. It also generates `build/bootstrap_pl.h` from
-  `src/bootstrap.pl`, `build/default_bindings_pl.h` from
-  `src/default_bindings.pl`, `build/undo_history_pl.h` from
-  `src/undo_history.pl`, `build/search_pl.h` from `src/search.pl`, and
-  `build/movement_pl.h` from `src/movement.pl` first (via
-  `tools/gen_pl_header.sh`), so `src/prolog.c`/`src/script.c` have something
-  to `#include`.
+  unlike raylib's old static archive. There's no codegen step for the `.pl`
+  files (see above) — `script.c`'s `resolvePlDir` finds `src/` next to the
+  running executable at startup (matching how `loadFontFile` finds the
+  bundled font), falling back to a plain `src` relative to the working
+  directory (which is what makes the test binary in `build/` — one directory
+  below the real `src/` — work: `make test` always runs with the repo root
+  as its working directory). `bootstrap.pl` is consulted first and is
+  mandatory (missing it is fatal, the same as a missing font); every other
+  `.pl` file found there except `default_bindings.pl` (which loads after
+  `init.pl` — see Scripting above) is consulted as te's "core" library, so
+  adding one is just adding the file.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.

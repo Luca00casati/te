@@ -1961,7 +1961,13 @@ int main(int argc, char **argv) {
 
     // Loaded before the command-line file (if any) is opened, so an
     // init.pl hook(post_open, ...) also fires for it.
-    scriptInit();
+    if (!scriptInit()) {
+        fprintf(stderr, "te: cannot load src/bootstrap.pl (expected next to the executable, or ./src when run from the repo)\n");
+        glyphs_deinit();
+        platformShutdown();
+        free(font_bytes);
+        return 1;
+    }
 
     // Arguments (parsed after window init so echo works): an optional file to
     // open, and `--screenshot <frames> <path>`. (--regex is handled headlessly
