@@ -1777,6 +1777,7 @@ void prologConsultFile(Prolog *pl, const char *path) {
     consultBuffer(pl, buf, rd);
     free(buf);
 }
+void prologConsultBuffer(Prolog *pl, const char *buf, size_t len) { consultBuffer(pl, buf, len); }
 
 size_t prologMark(Prolog *pl) {
     ArenaMark m = arenaMark(&pl->query);
@@ -1840,4 +1841,10 @@ bool prologGetInt(Prolog *pl, PlTerm *t, long *out) {
 PlTerm *prologMkAtom(Prolog *pl, const char *name) { return mkAtomRaw(&pl->query, internAtom(pl, name)); }
 PlTerm *prologMkCodeList(Prolog *pl, const char *chars, size_t len) { return mkCodeList(pl, chars, len); }
 PlTerm *prologMkInt(Prolog *pl, long v) { return mkIntRaw(&pl->query, v); }
+PlTerm *prologMkVar(Prolog *pl) { return newVar(&pl->query); }
+PlTerm *prologMkCompound(Prolog *pl, const char *functor, int arity, PlTerm **args) {
+    Term **owned = allocArgs(&pl->query, arity);
+    for (int i = 0; i < arity; i++) owned[i] = args[i];
+    return mkCompoundRaw(&pl->query, internAtom(pl, functor), arity, owned);
+}
 bool prologUnify(Prolog *pl, PlTerm *a, PlTerm *b) { return unify(pl, a, b); }

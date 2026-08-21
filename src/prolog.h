@@ -52,6 +52,12 @@ void prologRegisterNative(Prolog *pl, const char *name, int arity, PrologNative 
 // aborting.
 void prologConsultFile(Prolog *pl, const char *path);
 
+// Same idea, from an in-memory buffer instead of a file -- e.g. content
+// baked into the binary at build time rather than read from disk (see
+// src/bootstrap.pl / src/default_bindings.pl and their generated headers).
+// `buf` need not be NUL-terminated; `len` is authoritative.
+void prologConsultBuffer(Prolog *pl, const char *buf, size_t len);
+
 // --- Query-arena scratch space --------------------------------------------
 // Everything a query allocates (parsed terms, fresh variables, clause
 // renamings) lives in a bump-allocated arena reset back to a mark once the
@@ -87,10 +93,16 @@ PlTerm *prologArg(Prolog *pl, PlTerm *t, int i);            // 1-based
 bool prologGetText(Prolog *pl, PlTerm *t, const char **out_chars, size_t *out_len);
 bool prologGetInt(Prolog *pl, PlTerm *t, long *out);
 
-// --- Term construction (used by native predicates to build outputs) ------
+// --- Term construction (used by native predicates to build outputs, and by
+// callers that need to build a goal from caller-supplied data without
+// interpolating it into Prolog source text -- e.g. a command name typed at
+// a prompt, which could contain quotes or other syntax characters) ---------
 PlTerm *prologMkAtom(Prolog *pl, const char *name);
 PlTerm *prologMkCodeList(Prolog *pl, const char *chars, size_t len);
 PlTerm *prologMkInt(Prolog *pl, long v);
+PlTerm *prologMkVar(Prolog *pl);
+// Builds functor(args[0], ..., args[arity-1]) directly, no parsing involved.
+PlTerm *prologMkCompound(Prolog *pl, const char *functor, int arity, PlTerm **args);
 bool prologUnify(Prolog *pl, PlTerm *a, PlTerm *b);
 
 // Throws a Prolog error(te_error(Message), _) ball from within a native

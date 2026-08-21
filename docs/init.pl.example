@@ -6,20 +6,25 @@
 % Bindings and hooks are plain facts/rules, re-checked fresh every time
 % they're needed (not registered once as an opaque callback) -- so a
 % key_binding/leader_binding/hook clause can be a rule whose body consults
-% live editor state via te_text/1 etc., not just a fixed action.
+% live editor state via te_text/1 etc., not just a fixed action. te's own
+% defaults (src/default_bindings.pl) are facts too, loaded right after this
+% file -- a fact here at the same key/mod/name is tried first and wins.
 
 % key_binding(Key, Mod, Handler): Key is a single-character atom (g, 3) or
-% one of space/enter/tab/backspace/delete/escape. Mod is any, ctrl, or
-% ctrl_shift (underscore, not hyphen -- a bare Prolog atom can't contain one).
-% Handler is any goal; te_action(Name) runs a named command from
+% one of space/enter/kp_enter/tab/backspace/delete/escape. Mod is any, ctrl,
+% or ctrl_shift (underscore, not hyphen -- a bare Prolog atom can't contain
+% one). Handler is any goal; te_action(Name) runs a named command from
 % src/binding.h's COMMANDS table (as a quoted string, since those names have
-% hyphens a bare atom can't hold), same as typing it at the leader prompt.
+% hyphens a bare atom can't hold), same as typing it at the leader prompt --
+% every action has a name there, not just the ones also typeable at the
+% command prompt (see command/2 below). key_binding fires while the key is
+% held (auto-repeat); key_binding_once/3 is the same shape but fires once
+% per press only -- use it for things like this that shouldn't repeat.
 key_binding(g, ctrl_shift, te_action("select-all")).
 
 % Handler can also point at a plain existing action directly, as a shortcut
-% for a one-clause rule. Note: this overrides a matching built-in from
-% src/binding.h if one exists at the same key/mod -- script bindings are
-% always checked first.
+% for a one-clause rule. Note: this overrides the matching built-in from
+% src/default_bindings.pl at the same key/mod, since this file loads first.
 key_binding(t, ctrl_shift, te_action("toggle-wrap")).
 
 % A custom handler predicate can read/write the buffer directly: te_text/1
@@ -57,5 +62,44 @@ announce_save :-
     format_time(Now, "%H:%M:%S", T),
     atom_concat("saved at ", Now, Msg),
     te_echo(Msg).
+
+% te ships a small list/control library written in Prolog itself, not C --
+% member/2, append/3, maplist/2-4, forall/2, foldl/4, between/3, succ/2, and
+% more (see src/bootstrap.pl). A few of them put to use:
+
+% between/3 + forall/2: insert a 5-item numbered list template.
+key_binding(l, ctrl_shift, insert_numbered_list).
+insert_numbered_list :- forall(between(1, 5, N), insert_list_item(N)).
+insert_list_item(N) :-
+    atom_number(NAtom, N),
+    atom_concat(NAtom, '. \n', Line),
+    te_insert(Line).
+
+% member/2 + append/3 (in its "generate every split of a list" mode, the
+% classic way to write a substring/sublist search without a dedicated
+% primitive): warn if the buffer still has a loose TODO/FIXME/XXX marker.
+sub_list(Sub, List) :- append(_, Rest, List), append(Sub, _, Rest), !.
+key_binding(k, ctrl_shift, check_todo_markers).
+check_todo_markers :-
+    te_text(Text),
+    Markers = ["TODO", "FIXME", "XXX"],
+    (   member(Marker, Markers), sub_list(Marker, Text)
+    ->  te_echo("warning: buffer still has a TODO/FIXME/XXX marker")
+    ;   te_echo("no TODO markers found")
+    ).
+
+% numlist/3 + maplist/3 + foldl/4: build "1, 2, 3, ..., 10" as a small
+% generate -> transform -> reduce pipeline and insert it.
+key_binding(o, ctrl_shift, insert_number_range).
+insert_number_range :-
+    numlist(1, 10, Nums),
+    maplist(number_to_atom, Nums, Atoms),
+    foldl(join_comma, Atoms, '', Joined),
+    te_insert(Joined).
+number_to_atom(N, A) :- atom_number(A, N).
+join_comma(Next, '', Next) :- !.
+join_comma(Next, Acc, Result) :-
+    atom_concat(Acc, ', ', Acc1),
+    atom_concat(Acc1, Next, Result).
 
 :- te_echo("init.pl loaded").

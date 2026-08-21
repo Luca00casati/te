@@ -1186,8 +1186,10 @@ static void mbComplete(void) {
     size_t matches = 0;
     const char *lcp = "";
     size_t lcp_len = 0;
-    for (size_t ci = 0; ci < COMMANDS_COUNT; ci++) {
-        const char *name = COMMANDS[ci].name;
+    size_t command_count = scriptCommandCount();
+    for (size_t ci = 0; ci < command_count; ci++) {
+        const char *name;
+        if (!scriptCommandGet(ci, &name)) continue;
         size_t name_len = strlen(name);
         if (name_len < prefix_len || memcmp(name, mb_input, prefix_len) != 0) continue;
         if (matches == 0) {
@@ -1263,18 +1265,9 @@ static void mbConfirm(void) {
             size_t m = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1;
             memcpy(name, mb_input + s, m);
             name[m] = 0;
-            bool matched = false;
-            Action act = ACTION_QUIT;
-            for (size_t i = 0; i < COMMANDS_COUNT; i++) {
-                if (strcmp(COMMANDS[i].name, name) == 0) {
-                    act = COMMANDS[i].action;
-                    matched = true;
-                    break;
-                }
-            }
+            bool matched = scriptRunCommand(name);
             mbClose();
-            if (matched) applyAction(act);
-            else echoFmt("No command: %s", name);
+            if (!matched) echoFmt("No command: %s", name);
             return;
         }
         default: break;
@@ -1753,26 +1746,13 @@ static void handleInput(bool ctrl, Metrics m) {
             }
         }
     }
-    // Script-registered bindings (key_binding/3, from init.pl) get first look, so
-    // a user script can override a built-in; if none match, fall through to
-    // the built-in BINDINGS table exactly as before.
-    if (!scriptHandleKey(cmd, shift)) {
-        for (size_t bi = 0; bi < BINDINGS_COUNT; bi++) {
-            const Binding *b = &BINDINGS[bi];
-            if (!modMatchesKey(b->mod, cmd, shift)) continue;
-            // Modal mode is navigation-only: bare keys move the caret and nothing
-            // else, so getting around stays fluid without exposing editing or
-            // destructive commands. Real Ctrl still triggers everything.
-            if (modal && !ctrl && !isNavAction(b->action)) continue;
-            bool hit = b->repeat ? pressed(b->key) : IsKeyPressed(b->key);
-            if (hit) {
-                // Extend the selection when the mark is active, or on a plain
-                // Shift+navigation key (not when Shift is part of a chord).
-                sel_extend = mark_active || (shift && b->mod == MOD_ANY);
-                runAction(b->action);
-            }
-        }
-    }
+    // key_binding/3 + key_binding_once/3 (src/default_bindings.pl, plus
+    // whatever a user init.pl added or overrode) are the sole dispatch path
+    // now -- modal-mode's navigation-only restriction and the mark/Shift
+    // selection-extend computation both moved into scriptHandleKey (see
+    // script.c's matchAndRun), via the editorIsNavAction/editorGetMarkActive/
+    // editorSetSelExtend calls it makes back into this file.
+    scriptHandleKey(ctrl, shift, modal);
     float wheel = GetMouseWheelMove();
     if (wheel != 0) {
         // With wrap, lines vary in height, so just stop at the last line.
@@ -1837,9 +1817,8 @@ static void handlePrefix(bool ctrl) {
         echo("Quit");
         return;
     }
-    // Script-registered leader chords (leader_binding/3, from init.pl) get
-    // first look, so a user script can override a built-in chord or even the
-    // help overlays below; if none match, fall through to the built-ins.
+    // leader_binding/3 (src/default_bindings.pl, plus whatever a user
+    // init.pl added or overrode) is the sole chord dispatch path now.
     if (scriptHandlePrefixKey(shift)) {
         prefix_pending = false;
         // See the matching drain below: swallow a same-key char event GLFW
@@ -1860,25 +1839,6 @@ static void handlePrefix(bool ctrl) {
         prefix_pending = false;
         help = HELP_COMMANDS;
         return;
-    }
-    // chord path: leader <key>, with or without Ctrl
-    for (size_t i = 0; i < PREFIX_BINDINGS_COUNT; i++) {
-        const Binding *b = &PREFIX_BINDINGS[i];
-        if (!modMatchesChord(b->mod, shift)) continue;
-        if (IsKeyPressed(b->key)) {
-            prefix_pending = false;
-            applyAction(b->action);
-            // Some actions (e.g. quit) don't resolve until a later frame's
-            // handleInput()/handleMinibuffer(), by which point GLFW may still
-            // have queued a char event for this same keypress; swallow it so
-            // it isn't typed into the buffer or a prompt on that later frame.
-            // That event can also arrive a frame or two late in the first
-            // place (async IME commit), after this drain already ran and
-            // found nothing -- swallow_char_frames keeps catching it.
-            while (GetCharPressed() != 0) {}
-            swallow_char_frames = 3;
-            return;
-        }
     }
     // any other printable key is an undefined chord: cancel
     if (GetCharPressed() > 0) {
@@ -1977,41 +1937,49 @@ static const char *keyLabel(int key) {
     return "";
 }
 // Human-readable chord like "C-S-Left" or "B" into buf; returns its length.
-static size_t comboName(char *buf, const Binding *b) {
+static size_t comboName(char *buf, int key, Mod mod) {
     size_t n = 0;
-    const char *pfx = modPrefix(b->mod);
+    const char *pfx = modPrefix(mod);
     size_t pfx_len = strlen(pfx);
     memcpy(buf + n, pfx, pfx_len);
     n += pfx_len;
-    const char *named = keyLabel(b->key);
+    const char *named = keyLabel(key);
     size_t named_len = strlen(named);
     if (named_len > 0) {
         memcpy(buf + n, named, named_len);
         n += named_len;
-    } else if (b->key >= 'A' && b->key <= 'Z') {
-        buf[n++] = (char)b->key;
+    } else if (key >= 'A' && key <= 'Z') {
+        buf[n++] = (char)key;
     } else {
         buf[n++] = '?';
     }
     return n;
 }
-// Distinct actions across the direct keybindings (one help row each).
+// Distinct labels across the direct keybindings (one help row each) -- a
+// linear "seen" scan rather than an Action-indexed array, since a binding's
+// label (scriptTopBindingGet) is now a string, not necessarily one of
+// ACTION_LABELS (a user init.pl's custom handler gets its own predicate
+// name as a fallback label).
 static size_t navRowCount(void) {
-    bool shown[ACTION_COUNT] = { 0 };
-    size_t n = 0;
-    for (size_t i = 0; i < BINDINGS_COUNT; i++) {
-        Action a = BINDINGS[i].action;
-        if (shown[a]) continue;
-        shown[a] = true;
-        n++;
+    size_t total = scriptTopBindingCount();
+    const char *seen[ACTION_COUNT + 64];
+    size_t seenCount = 0, rows = 0;
+    for (size_t i = 0; i < total; i++) {
+        int key; Mod mod; const char *label;
+        if (!scriptTopBindingGet(i, &key, &mod, &label)) continue;
+        bool dup = false;
+        for (size_t s = 0; s < seenCount; s++) if (strcmp(seen[s], label) == 0) { dup = true; break; }
+        if (dup) continue;
+        if (seenCount < sizeof(seen) / sizeof(seen[0])) seen[seenCount++] = label;
+        rows++;
     }
-    return n;
+    return rows;
 }
 // Emacs-style: the help grows upward from the echo/status area as a panel of
 // lines, rather than a full-screen overlay.
 static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap) {
     float status_y = win_h - 2 * line_h; // top of the status line
-    size_t content = (help == HELP_NAV) ? navRowCount() : (COMMANDS_COUNT + 1);
+    size_t content = (help == HELP_NAV) ? navRowCount() : (scriptCommandCount() + 1);
     float pad = line_h * 0.5f;
     float block_h = (float)(content + 2) * line_h + pad * 2;
     float top = status_y - block_h;
@@ -2025,16 +1993,23 @@ static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tm
     if (help == HELP_NAV) {
         DrawTextEx(font, "Navigation & editing keys  (Ctrlx2 n)", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_CURSOR);
         y += line_h;
-        bool shown[ACTION_COUNT] = { 0 };
-        for (size_t bi = 0; bi < BINDINGS_COUNT; bi++) {
-            Action a = BINDINGS[bi].action;
-            if (shown[a]) continue;
-            shown[a] = true;
+        size_t total = scriptTopBindingCount();
+        const char *shown[ACTION_COUNT + 64];
+        size_t shownCount = 0;
+        for (size_t bi = 0; bi < total; bi++) {
+            int key; Mod mod; const char *label;
+            if (!scriptTopBindingGet(bi, &key, &mod, &label)) continue;
+            bool dup = false;
+            for (size_t s = 0; s < shownCount; s++) if (strcmp(shown[s], label) == 0) { dup = true; break; }
+            if (dup) continue;
+            if (shownCount < sizeof(shown) / sizeof(shown[0])) shown[shownCount++] = label;
             char cbuf[96];
             size_t clen = 0;
             bool first = true;
-            for (size_t bj = 0; bj < BINDINGS_COUNT; bj++) {
-                if (BINDINGS[bj].action != a) continue;
+            for (size_t bj = 0; bj < total; bj++) {
+                int key2; Mod mod2; const char *label2;
+                if (!scriptTopBindingGet(bj, &key2, &mod2, &label2)) continue;
+                if (strcmp(label2, label) != 0) continue;
                 if (!first) {
                     cbuf[clen] = ',';
                     cbuf[clen + 1] = ' ';
@@ -2042,12 +2017,11 @@ static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tm
                 }
                 first = false;
                 char one[24];
-                size_t cs = comboName(one, &BINDINGS[bj]);
+                size_t cs = comboName(one, key2, mod2);
                 memcpy(cbuf + clen, one, cs);
                 clen += cs;
             }
-            const char *lab = ACTION_LABELS[a];
-            int n = snprintf(tmp, tmp_cap, "%-22.*s%s", (int)clen, cbuf, lab);
+            int n = snprintf(tmp, tmp_cap, "%-22.*s%s", (int)clen, cbuf, label);
             if (n < 0) continue;
             DrawTextEx(font, tmp, (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_FG);
             y += line_h;
@@ -2055,16 +2029,22 @@ static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tm
     } else {
         DrawTextEx(font, "Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_CURSOR);
         y += line_h;
-        for (size_t ci = 0; ci < COMMANDS_COUNT; ci++) {
+        size_t command_count = scriptCommandCount();
+        size_t leader_count = scriptLeaderBindingCount();
+        for (size_t ci = 0; ci < command_count; ci++) {
+            const char *name;
+            if (!scriptCommandGet(ci, &name)) continue;
             char chord[24] = "";
-            for (size_t pi = 0; pi < PREFIX_BINDINGS_COUNT; pi++) {
-                if (PREFIX_BINDINGS[pi].action != COMMANDS[ci].action) continue;
+            for (size_t pi = 0; pi < leader_count; pi++) {
+                int key; Mod mod; const char *label;
+                if (!scriptLeaderBindingGet(pi, &key, &mod, &label)) continue;
+                if (strcmp(label, name) != 0) continue;
                 char one[16];
-                size_t cs = comboName(one, &PREFIX_BINDINGS[pi]);
+                size_t cs = comboName(one, key, mod);
                 snprintf(chord, sizeof(chord), "Ctrlx2 %.*s", (int)cs, one);
                 break;
             }
-            int n = snprintf(tmp, tmp_cap, "%-16s%s", COMMANDS[ci].name, chord);
+            int n = snprintf(tmp, tmp_cap, "%-16s%s", name, chord);
             if (n < 0) continue;
             DrawTextEx(font, tmp, (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_FG);
             y += line_h;
@@ -2203,6 +2183,9 @@ void editorSetCursor(size_t pos) {
     cursor = pos;
     anchor = pos;
 }
+bool editorIsNavAction(Action action) { return isNavAction(action); }
+bool editorGetMarkActive(void) { return mark_active; }
+void editorSetSelExtend(bool extend) { sel_extend = extend; }
 
 int main(int argc, char **argv) {
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits

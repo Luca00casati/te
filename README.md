@@ -115,37 +115,47 @@ cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
 ## Scripting
 
 `te` loads an optional Prolog init script at startup —
-`$XDG_CONFIG_HOME/te/init.pl`, falling back to `~/.config/te/init.pl` — the
-way Emacs loads `.emacs` or Vim loads `init.vim`. A missing file is fine (te
-just uses its `src/binding.h` defaults); a script error is echoed on the
-status line instead of stopping `te` from starting. See
-`docs/init.pl.example` for a starting point.
+`$XDG_CONFIG_HOME/te/init.pl`, falling back to `~/.config/te/init.pl` —
+the way Emacs loads `.emacs` or Vim loads `init.vim` — **followed by te's
+own `src/default_bindings.pl`**, baked into the binary at build time. A
+missing init.pl is fine (te just uses its built-in defaults); a script
+error is echoed on the status line instead of stopping `te` from starting.
+See `docs/init.pl.example` for a starting point.
 
-Bindings and hooks are plain **facts and rules**, re-checked fresh every time
-they're needed rather than registered once as an opaque callback — so a
-clause can be a rule whose body consults live editor state, not just a fixed
-action:
+Bindings, hooks, and commands are plain **facts and rules** — not just for
+`init.pl`, `te`'s own defaults are facts too (`src/default_bindings.pl`),
+re-checked fresh every time they're needed rather than registered once as
+an opaque callback, so a clause can be a rule whose body consults live
+editor state, not just a fixed action. Since `init.pl` loads *before* the
+built-in defaults, a user fact at the same key/mod/name is tried first and
+wins — clauses are tried in assertion order, first match runs:
 
 | Predicate | Does |
 | --- | --- |
-| `key_binding(Key, Mod, Handler)` | Bind a top-level key to any goal, or an existing action via `te_action(Name)` |
-| `leader_binding(Key, Mod, Handler)` | Same, but as a leader chord (after the double-Ctrl-tap leader) |
+| `key_binding(Key, Mod, Handler)` | Bind a top-level key to any goal, or an existing action via `te_action(Name)`. Fires while held (auto-repeat) |
+| `key_binding_once(Key, Mod, Handler)` | Same, but fires once per press, not on auto-repeat — for things like copy/cut/paste, search, quit |
+| `leader_binding(Key, Mod, Handler)` | Same idea as a leader chord (after the double-Ctrl-tap leader); never auto-repeats regardless |
+| `command(Name, Handler)` | Bind `Name` as a command typeable at the leader/triple-tap-Ctrl prompt |
 | `hook(Event, Handler)` | Run `Handler` whenever `Event` fires: `post_save` or `post_open` |
-| `te_action(Name)` | Run a named command (anything in `COMMANDS`, `src/binding.h`) |
+| `te_action(Name)` | Run a named command (anything in `COMMANDS`, `src/binding.h` — every action has a name, not just the ones typeable as a command) |
 | `te_echo(Msg)` | Write a message to the status line |
 | `te_insert(Text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
 | `te_text(Text)` | Unify `Text` with the whole buffer, as a list of character codes |
 | `te_cursor(Pos)` / `te_set_cursor(Pos)` | Get/set the cursor as a byte offset |
 
 `Key` is a single-character atom (`g`, `3`) or one of `space`, `enter`,
-`tab`, `backspace`, `delete`, `escape`. `Mod` is `any`, `ctrl`, or
-`ctrl_shift` (underscore, not hyphen — a bare Prolog atom can't hold one).
-`Handler` is any goal — a custom predicate, or a direct `te_action(Name)`
-call (action names like `"select-all"` have a hyphen, so pass them as a
-quoted `"..."` rather than bare — see below, it works as either an atom or
-text argument). Script bindings are checked before the built-in
-`BINDINGS`/`PREFIX_BINDINGS` tables, so they can override a default; an
-uncaught error inside a handler is echoed rather than crashing `te`.
+`kp_enter`, `tab`, `backspace`, `delete`, `escape`. `Mod` is `any`, `ctrl`,
+or `ctrl_shift` (underscore, not hyphen — a bare Prolog atom can't hold
+one). `Handler` is any goal — a custom predicate, or a direct
+`te_action(Name)` call (action names like `"select-all"` have a hyphen, so
+pass them as a quoted `"..."` rather than bare — see below, it works as
+either an atom or text argument). Modal (command) mode restricts a bare key
+to navigation: a `te_action(Name)`-shaped handler where `Name` is a
+navigation action still fires, anything else (including any custom
+handler predicate — there's no general way to tell whether an arbitrary
+goal "is navigation") is blocked, same as it always was for a non-nav
+built-in. An uncaught error inside a handler is echoed rather than
+crashing `te`.
 
 The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch, ISO-flavored
 Prolog**, not a wrapper around an external library: facts/rules, unification,
@@ -245,9 +255,10 @@ Two suites, both under `tests/`:
   embedded into the binary; `te` exits with a clear error if it can't find it.
 - `src/config.h` — all the tunables (window size, font size, colors, tab,
   buffer capacity). Font size is 16 by default; multiples of 16 stay crisp.
-- `src/binding.h` — the key → action map. The leader is armed by a double-tap
-  of Ctrl (`detectCtrlTaps` in `main.c`); edit `BINDINGS`/`PREFIX_BINDINGS`/
-  `COMMANDS` to rebind.
+- `src/binding.h` — the `Action`/`Mod` enums every key ultimately resolves to
+  and their human-readable labels; not a key → action map anymore (that's
+  `src/default_bindings.pl` now — see Scripting above). The leader is armed
+  by a double-tap of Ctrl (`detectCtrlTaps` in `main.c`).
 - `src/prolog.c`/`prolog.h` — the from-scratch Prolog engine (see Scripting
   above): tokenizer, operator-precedence parser, term representation,
   unification, a backtracking CPS solver with cut/catch/throw, and a small
@@ -257,19 +268,30 @@ Two suites, both under `tests/`:
   (see Scripting above). `nob.c` turns it into `build/bootstrap_pl.h` (a byte
   array baked into the binary) before compiling `src/prolog.c`, which
   consults it once at `prologCreate`.
+- `src/default_bindings.pl` — te's own key bindings/leader chords/commands,
+  as `key_binding`/`key_binding_once`/`leader_binding`/`command` facts (see
+  Scripting above) — what used to be the static `BINDINGS`/`PREFIX_BINDINGS`/
+  `COMMANDS` tables in `src/binding.h`. `nob.c` bakes it into
+  `build/default_bindings_pl.h`, the same way as `bootstrap.pl`;
+  `scriptInit`/`scriptInitFromFile` in `script.c` consult it right after the
+  user's `init.pl`.
 - `src/script.c` — the Prolog integration (registers `te_*` native
-  predicates, loads `init.pl`). `src/editor.h` is the small explicit surface
-  `main.c` exposes to it (run an action, echo, insert text, read/move the
-  cursor) so script.c never reaches into `main.c`'s static state directly;
-  `handleInput`/`handlePrefix` in `main.c` check script-registered bindings
-  before the built-in `BINDINGS`/`PREFIX_BINDINGS` tables, and
-  `saveFile`/`openPath` call `scriptRunHook` for `hook/2` listeners.
+  predicates, loads `init.pl` then `default_bindings.pl`, and is the *sole*
+  key/leader/command dispatch path — no native fallback table). `src/editor.h`
+  is the small explicit surface `main.c` exposes to it (run an action, echo,
+  insert/read the buffer, move the cursor, check modal-mode's nav-only
+  restriction, read/set the mark and selection-extend state) so script.c
+  never reaches into `main.c`'s static state directly; `handleInput`/
+  `handlePrefix` in `main.c` call `scriptHandleKey`/`scriptHandlePrefixKey`
+  unconditionally, and `saveFile`/`openPath` call `scriptRunHook` for
+  `hook/2` listeners.
 - `nob.c` compiles `src/main.c`, `src/glyphs.c`, `src/script.c`, and
   `src/prolog.c` with `cc -std=c11` and links against the system-installed
   raylib and libpcre2-8 (plain `-lraylib -lpcre2-8`; the Prolog engine adds no
   external dependency), plus the Linux desktop system libraries raylib's
   GLFW backend needs, into `./te` in the project root. It also generates
-  `build/bootstrap_pl.h` from `src/bootstrap.pl` first, so `src/prolog.c` has
+  `build/bootstrap_pl.h` from `src/bootstrap.pl` and `build/default_bindings_pl.h`
+  from `src/default_bindings.pl` first, so `src/prolog.c`/`src/script.c` have
   something to `#include`.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
