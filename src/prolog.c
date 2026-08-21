@@ -484,12 +484,6 @@ static _Noreturn void throwTypeError(Prolog *pl, const char *validType, Term *cu
     a[1] = culprit;
     throwFormal(pl, mkCompoundRaw(&pl->query, internAtom(pl, "type_error"), 2, a));
 }
-static _Noreturn void throwDomainError(Prolog *pl, const char *domain, Term *culprit) {
-    Term **a = allocArgs(&pl->query, 2);
-    a[0] = mkAtomRaw(&pl->query, internAtom(pl, domain));
-    a[1] = culprit;
-    throwFormal(pl, mkCompoundRaw(&pl->query, internAtom(pl, "domain_error"), 2, a));
-}
 static Term *mkSlash(Prolog *pl, Atom name, int arity) {
     Term **a = allocArgs(&pl->query, 2);
     a[0] = mkAtomRaw(&pl->query, name);
@@ -757,7 +751,7 @@ static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skct
         undoTrailTo(pl, tmark);
         return inner ? false : sc(pl, skctx);
     }
-    if (functor == pl->atomCall && arity >= 1 && arity <= 3) {
+    if (functor == pl->atomCall && arity >= 1 && arity <= 8) {
         Term *base = deref(args[0]);
         Term *effective;
         int extra = arity - 1;
@@ -1155,20 +1149,45 @@ static bool nativeCopyTerm(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
     return unify(pl, a[1], copyTermFresh(&pl->query, a[0]));
 }
-static bool nativeSucc(Prolog *pl, Term **a, int arity, void *ctx) {
-    (void)arity; (void)ctx;
-    Term *X = deref(a[0]), *Y = deref(a[1]);
-    if (X->tag == T_INT) {
-        if (X->u.i < 0) throwDomainError(pl, "not_less_than_zero", X);
-        return unify(pl, a[1], mkIntRaw(&pl->query, X->u.i + 1));
-    }
-    if (Y->tag == T_INT) {
-        if (Y->u.i < 0) throwDomainError(pl, "not_less_than_zero", Y);
-        if (Y->u.i == 0) return false;
-        return unify(pl, a[0], mkIntRaw(&pl->query, Y->u.i - 1));
-    }
-    throwInstantiationError(pl);
+
+// --- ISO type-checking predicates -----------------------------------------
+// Building blocks for Prolog-level library definitions (see BOOTSTRAP_SRC)
+// as much as user-facing predicates -- e.g. succ/2 is written in Prolog on
+// top of var/1 and integer/1 rather than as a native.
+static bool nativeVar(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_VAR; }
+static bool nativeNonvar(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag != T_VAR; }
+static bool nativeAtomCheck(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_ATOM; }
+static bool nativeAtomicCheck(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)pl; (void)arity; (void)ctx;
+    Tag t = deref(a[0])->tag;
+    return t == T_ATOM || t == T_INT || t == T_FLT;
 }
+static bool nativeNumberCheck(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)pl; (void)arity; (void)ctx;
+    Tag t = deref(a[0])->tag;
+    return t == T_INT || t == T_FLT;
+}
+static bool nativeIntegerCheck(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_INT; }
+static bool nativeFloatCheck(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_FLT; }
+static bool nativeCompoundCheck(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_CMP; }
+static bool nativeCallableCheck(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)pl; (void)arity; (void)ctx;
+    Tag t = deref(a[0])->tag;
+    return t == T_ATOM || t == T_CMP;
+}
+static bool isProperList(Prolog *pl, Term *t) {
+    t = deref(t);
+    while (t->tag == T_CMP && t->u.cmp.functor == pl->atomDot && t->u.cmp.arity == 2) t = deref(t->u.cmp.args[1]);
+    return t->tag == T_ATOM && t->u.atom == pl->atomNil;
+}
+static bool nativeIsList(Prolog *pl, Term **a, int arity, void *ctx) { (void)arity; (void)ctx; return isProperList(pl, a[0]); }
+static bool isGround(Term *t) {
+    t = deref(t);
+    if (t->tag == T_VAR) return false;
+    if (t->tag == T_CMP) for (int i = 0; i < t->u.cmp.arity; i++) if (!isGround(t->u.cmp.args[i])) return false;
+    return true;
+}
+static bool nativeGround(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return isGround(a[0]); }
 
 // --- standard order of terms: Var @< Number @< Atom @< Compound ----------
 
@@ -1304,7 +1323,17 @@ static void registerStdlib(Prolog *pl) {
     prologRegisterNative(pl, "=..", 2, nativeUniv, NULL);
     prologRegisterNative(pl, "arg", 3, nativeArg, NULL);
     prologRegisterNative(pl, "copy_term", 2, nativeCopyTerm, NULL);
-    prologRegisterNative(pl, "succ", 2, nativeSucc, NULL);
+    prologRegisterNative(pl, "var", 1, nativeVar, NULL);
+    prologRegisterNative(pl, "nonvar", 1, nativeNonvar, NULL);
+    prologRegisterNative(pl, "atom", 1, nativeAtomCheck, NULL);
+    prologRegisterNative(pl, "atomic", 1, nativeAtomicCheck, NULL);
+    prologRegisterNative(pl, "number", 1, nativeNumberCheck, NULL);
+    prologRegisterNative(pl, "integer", 1, nativeIntegerCheck, NULL);
+    prologRegisterNative(pl, "float", 1, nativeFloatCheck, NULL);
+    prologRegisterNative(pl, "compound", 1, nativeCompoundCheck, NULL);
+    prologRegisterNative(pl, "callable", 1, nativeCallableCheck, NULL);
+    prologRegisterNative(pl, "is_list", 1, nativeIsList, NULL);
+    prologRegisterNative(pl, "ground", 1, nativeGround, NULL);
     prologRegisterNative(pl, "compare", 3, nativeCompare, NULL);
     prologRegisterNative(pl, "@<", 2, nativeOrderCmp, "@<");
     prologRegisterNative(pl, "@=<", 2, nativeOrderCmp, "@=<");
@@ -1678,13 +1707,100 @@ Prolog *prologCreate(void) {
     pl->atomDot = internAtom(pl, ".");
     pl->atomError = internAtom(pl, "error");
     registerStdlib(pl);
-    // between/3 needs real backtracking (nondeterministic generate-and-test)
-    // that a native predicate's single-bool-return ABI can't express -- it's
-    // bootstrapped as ordinary clauses instead, reusing the existing
-    // clause/backtracking engine as-is.
+    // Library predicates that don't need anything a native C function can do
+    // that ordinary clauses can't -- written in Prolog, on top of the
+    // natives above, rather than hand-coded in C. between/3 in particular
+    // needs real backtracking (nondeterministic generate-and-test) that a
+    // native predicate's single-bool-return ABI can't express; the rest are
+    // here because a recursive clause is simply the natural way to write
+    // them, exercising the engine's own unification/backtracking instead of
+    // duplicating that logic in C.
     static const char *const BOOTSTRAP_SRC =
         "between(Low, High, Low) :- Low =< High.\n"
-        "between(Low, High, X) :- Low < High, Low1 is Low + 1, between(Low1, High, X).\n";
+        "between(Low, High, X) :- Low < High, Low1 is Low + 1, between(Low1, High, X).\n"
+        "\n"
+        "succ(X, Y) :-\n"
+        "    var(X), !,\n"
+        "    ( var(Y) -> throw(error(instantiation_error, _))\n"
+        "    ; \\+ integer(Y) -> throw(error(type_error(integer, Y), _))\n"
+        "    ; Y < 0 -> throw(error(domain_error(not_less_than_zero, Y), _))\n"
+        "    ; Y =:= 0 -> fail\n"
+        "    ; X is Y - 1\n"
+        "    ).\n"
+        "succ(X, Y) :-\n"
+        "    integer(X), !,\n"
+        "    ( X < 0 -> throw(error(domain_error(not_less_than_zero, X), _))\n"
+        "    ; Y is X + 1\n"
+        "    ).\n"
+        "succ(X, _) :- throw(error(type_error(integer, X), _)).\n"
+        "\n"
+        "member(X, [X|_]).\n"
+        "member(X, [_|T]) :- member(X, T).\n"
+        "memberchk(X, L) :- member(X, L), !.\n"
+        "\n"
+        "append([], L, L).\n"
+        "append([H|T], L, [H|R]) :- append(T, L, R).\n"
+        "\n"
+        "reverse(L, R) :- reverse_(L, [], R).\n"
+        "reverse_([], Acc, Acc).\n"
+        "reverse_([H|T], Acc, R) :- reverse_(T, [H|Acc], R).\n"
+        "\n"
+        "last([X], X) :- !.\n"
+        "last([_|T], X) :- last(T, X).\n"
+        "\n"
+        "nth0(N, List, Elem) :- integer(N), !, N >= 0, nth0_det(N, List, Elem).\n"
+        "nth0(N, List, Elem) :- var(N), !, nth0_gen(List, Elem, 0, N).\n"
+        "nth0_det(0, [X|_], X) :- !.\n"
+        "nth0_det(N, [_|T], X) :- N > 0, N1 is N - 1, nth0_det(N1, T, X).\n"
+        "nth0_gen([X|_], X, I, I).\n"
+        "nth0_gen([_|T], X, I0, I) :- I1 is I0 + 1, nth0_gen(T, X, I1, I).\n"
+        "nth1(N, List, Elem) :- integer(N), !, N >= 1, N0 is N - 1, nth0_det(N0, List, Elem).\n"
+        "nth1(N, List, Elem) :- var(N), !, nth0_gen(List, Elem, 1, N).\n"
+        "\n"
+        "sum_list(L, S) :- sum_list_(L, 0, S).\n"
+        "sum_list_([], S, S).\n"
+        "sum_list_([H|T], Acc, S) :- Acc1 is Acc + H, sum_list_(T, Acc1, S).\n"
+        "max_list([X], X) :- !.\n"
+        "max_list([H|T], M) :- max_list(T, M0), ( H > M0 -> M = H ; M = M0 ).\n"
+        "min_list([X], X) :- !.\n"
+        "min_list([H|T], M) :- min_list(T, M0), ( H < M0 -> M = H ; M = M0 ).\n"
+        "numlist(Low, High, []) :- Low > High, !.\n"
+        "numlist(Low, High, [Low|Rest]) :- Low =< High, Low1 is Low + 1, numlist(Low1, High, Rest).\n"
+        "\n"
+        "maplist(_, []).\n"
+        "maplist(G, [X|Xs]) :- call(G, X), maplist(G, Xs).\n"
+        "maplist(_, [], []).\n"
+        "maplist(G, [X|Xs], [Y|Ys]) :- call(G, X, Y), maplist(G, Xs, Ys).\n"
+        "maplist(_, [], [], []).\n"
+        "maplist(G, [X|Xs], [Y|Ys], [Z|Zs]) :- call(G, X, Y, Z), maplist(G, Xs, Ys, Zs).\n"
+        "\n"
+        "forall(Cond, Action) :- \\+ (Cond, \\+ Action).\n"
+        "\n"
+        "include(_, [], []).\n"
+        "include(G, [X|Xs], Result) :-\n"
+        "    ( call(G, X) -> Result = [X|Rest] ; Result = Rest ),\n"
+        "    include(G, Xs, Rest).\n"
+        "exclude(_, [], []).\n"
+        "exclude(G, [X|Xs], Result) :-\n"
+        "    ( call(G, X) -> Result = Rest ; Result = [X|Rest] ),\n"
+        "    exclude(G, Xs, Rest).\n"
+        "\n"
+        "foldl(_, [], Acc, Acc).\n"
+        "foldl(G, [X|Xs], Acc0, Acc) :- call(G, X, Acc0, Acc1), foldl(G, Xs, Acc1, Acc).\n"
+        "\n"
+        "delete([], _, []).\n"
+        "delete([X|Xs], Y, Result) :- \\+ X \\= Y, !, delete(Xs, Y, Result).\n"
+        "delete([X|Xs], Y, [X|Result]) :- delete(Xs, Y, Result).\n"
+        "\n"
+        "subtract([], _, []).\n"
+        "subtract([X|Xs], L, Result) :- memberchk(X, L), !, subtract(Xs, L, Result).\n"
+        "subtract([X|Xs], L, [X|Result]) :- subtract(Xs, L, Result).\n"
+        "intersection([], _, []).\n"
+        "intersection([X|Xs], L, [X|Result]) :- memberchk(X, L), !, intersection(Xs, L, Result).\n"
+        "intersection([_|Xs], L, Result) :- intersection(Xs, L, Result).\n"
+        "union([], L, L).\n"
+        "union([X|Xs], L, Result) :- memberchk(X, L), !, union(Xs, L, Result).\n"
+        "union([X|Xs], L, [X|Result]) :- union(Xs, L, Result).\n";
     consultBuffer(pl, BOOTSTRAP_SRC, strlen(BOOTSTRAP_SRC));
     return pl;
 }

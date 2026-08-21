@@ -2,10 +2,15 @@
 // for the `te`-facing integration that sits on top of this). Covers facts,
 // rules, unification, backtracking, cut, if-then-else, arithmetic,
 // structured ISO error terms (error(Formal, Context)), catch/throw,
-// assert/retract, findall, standard order of terms, and a practical-subset
-// parser with infix operators (no user-defined op/3). "..." is a proper ISO
-// list of character codes (bytes, not Unicode codepoints -- see
+// assert/retract, findall, standard order of terms, type-checking
+// predicates (var/1, atom/1, integer/1, ...), and a practical-subset parser
+// with infix operators (no user-defined op/3). "..." is a proper ISO list
+// of character codes (bytes, not Unicode codepoints -- see
 // mkCodeList/getTextFlexible in prolog.c), not a distinct string type.
+// A library of list/control predicates (member/2, append/3, maplist/2-4,
+// forall/2, foldl/4, between/3, succ/2, ...) is bootstrapped as ordinary
+// Prolog clauses in prologCreate rather than hand-coded in C -- most of them
+// don't need anything a native C function can do that clauses can't.
 // ISO-flavored, not a certified conformance suite.
 #ifndef TE_PROLOG_H
 #define TE_PROLOG_H

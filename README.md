@@ -152,16 +152,27 @@ Prolog**, not a wrapper around an external library: facts/rules, unification,
 backtracking, cut (`!`), if-then-else, arithmetic, structured ISO error terms
 (`error(type_error(...), _)`, `instantiation_error`, `existence_error/2`, …,
 all catchable by shape via `catch/3`), standard order of terms (`compare/3`,
-`@</2`, `@=</2`, `@>/2`, `@>=/2`), `assert`/`retract`, `findall/3`,
-`functor/3`, `=../2`, `arg/3`, `copy_term/2`, `sort/2`/`msort/2`,
-`between/3`, `succ/2`, `atom_codes/2`/`atom_chars/2`/`char_code/2`/
-`number_codes/2`/`number_chars/2`, and a practical-subset parser with a fixed
-infix operator table (no user-defined `op/3`). Per ISO, `"..."` is a proper
-list of character codes, not its own string type — `te_text/1` and friends
-accept either an atom or a code list for text arguments, so `"..."` literals
-still read naturally in scripts. "Codes" are raw bytes (0–255), not Unicode
-codepoints, matching `te`'s raw-UTF-8 buffer. ISO-flavored, not a certified
-conformance suite.
+`@</2`, `@=</2`, `@>/2`, `@>=/2`), type-checking predicates (`var/1`,
+`nonvar/1`, `atom/1`, `atomic/1`, `number/1`, `integer/1`, `float/1`,
+`compound/1`, `callable/1`, `is_list/1`, `ground/1`), `assert`/`retract`,
+`findall/3`, `functor/3`, `=../2`, `arg/3`, `copy_term/2`, `sort/2`/`msort/2`,
+`atom_codes/2`/`atom_chars/2`/`char_code/2`/`number_codes/2`/`number_chars/2`,
+and a practical-subset parser with a fixed infix operator table (no
+user-defined `op/3`). Per ISO, `"..."` is a proper list of character codes,
+not its own string type — `te_text/1` and friends accept either an atom or a
+code list for text arguments, so `"..."` literals still read naturally in
+scripts. "Codes" are raw bytes (0–255), not Unicode codepoints, matching
+`te`'s raw-UTF-8 buffer.
+
+A list/control-predicate library — `member/2`, `memberchk/2`, `append/3`,
+`reverse/2`, `last/2`, `nth0/3`/`nth1/3`, `sum_list/2`, `max_list/2`/
+`min_list/2`, `numlist/3`, `maplist/2-4`, `forall/2`, `include/3`/`exclude/3`,
+`foldl/4`, `delete/3`, `subtract/3`/`intersection/3`/`union/3`, `between/3`,
+`succ/2` — is bootstrapped as ordinary Prolog clauses consulted at startup
+(`BOOTSTRAP_SRC` in `prologCreate`) rather than hand-coded in C: most of them
+don't need anything a native function can do that a recursive clause can't,
+so the engine dogfeeds its own unification/backtracking instead of
+duplicating that logic. ISO-flavored, not a certified conformance suite.
 
 ## Dependencies
 
