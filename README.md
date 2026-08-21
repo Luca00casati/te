@@ -168,11 +168,15 @@ A list/control-predicate library — `member/2`, `memberchk/2`, `append/3`,
 `reverse/2`, `last/2`, `nth0/3`/`nth1/3`, `sum_list/2`, `max_list/2`/
 `min_list/2`, `numlist/3`, `maplist/2-4`, `forall/2`, `include/3`/`exclude/3`,
 `foldl/4`, `delete/3`, `subtract/3`/`intersection/3`/`union/3`, `between/3`,
-`succ/2` — is bootstrapped as ordinary Prolog clauses consulted at startup
-(`BOOTSTRAP_SRC` in `prologCreate`) rather than hand-coded in C: most of them
-don't need anything a native function can do that a recursive clause can't,
-so the engine dogfeeds its own unification/backtracking instead of
-duplicating that logic. ISO-flavored, not a certified conformance suite.
+`succ/2` — lives in `src/bootstrap.pl`, real Prolog source consulted at
+startup rather than hand-coded in C: most of them don't need anything a
+native function can do that a recursive clause can't, so the engine
+dogfeeds its own unification/backtracking instead of duplicating that
+logic. `nob.c` bakes it into the binary at build time (`build/bootstrap_pl.h`,
+generated from that file) rather than reading it from disk at runtime like
+the font — it's core engine behavior, not user-swappable content, so a
+missing/moved file shouldn't be a way to break it. ISO-flavored, not a
+certified conformance suite.
 
 ## Dependencies
 
@@ -248,6 +252,11 @@ Two suites, both under `tests/`:
   above): tokenizer, operator-precedence parser, term representation,
   unification, a backtracking CPS solver with cut/catch/throw, and a small
   built-in predicate library. Not editor-specific — doesn't know `te` exists.
+- `src/bootstrap.pl` — the engine's own standard library (`member/2`,
+  `maplist/2-4`, `between/3`, `succ/2`, ...), written in Prolog rather than C
+  (see Scripting above). `nob.c` turns it into `build/bootstrap_pl.h` (a byte
+  array baked into the binary) before compiling `src/prolog.c`, which
+  consults it once at `prologCreate`.
 - `src/script.c` — the Prolog integration (registers `te_*` native
   predicates, loads `init.pl`). `src/editor.h` is the small explicit surface
   `main.c` exposes to it (run an action, echo, insert text, read/move the
@@ -259,7 +268,9 @@ Two suites, both under `tests/`:
   `src/prolog.c` with `cc -std=c11` and links against the system-installed
   raylib and libpcre2-8 (plain `-lraylib -lpcre2-8`; the Prolog engine adds no
   external dependency), plus the Linux desktop system libraries raylib's
-  GLFW backend needs, into `./te` in the project root.
+  GLFW backend needs, into `./te` in the project root. It also generates
+  `build/bootstrap_pl.h` from `src/bootstrap.pl` first, so `src/prolog.c` has
+  something to `#include`.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.
