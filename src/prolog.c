@@ -30,7 +30,9 @@ static bool streq(const char *a, const char *b) { return strcmp(a, b) == 0; }
 // --- Terms ------------------------------------------------------------
 
 typedef int Atom;
-typedef enum { T_VAR, T_ATOM, T_INT, T_FLT, T_STR, T_CMP } Tag;
+// No distinct string type: per ISO, a "..." literal is a list of character
+// codes (see mkCodeList/getTextFlexible), not its own term type.
+typedef enum { T_VAR, T_ATOM, T_INT, T_FLT, T_CMP } Tag;
 
 struct Term {
     Tag tag;
@@ -39,7 +41,6 @@ struct Term {
         Atom atom;           // T_ATOM
         long i;              // T_INT
         double f;            // T_FLT
-        struct { const char *chars; size_t len; } str; // T_STR
         struct { Atom functor; int arity; struct Term **args; } cmp; // T_CMP
     } u;
 };
@@ -191,14 +192,6 @@ static Term *mkIntRaw(Arena *a, long v) {
 static Term *mkFloatRaw(Arena *a, double v) {
     Term *t = arenaAlloc(a, sizeof(Term)); t->tag = T_FLT; t->u.f = v; return t;
 }
-static Term *mkStringRaw(Arena *a, const char *chars, size_t len) {
-    char *copy = arenaAlloc(a, len + 1);
-    memcpy(copy, chars, len);
-    copy[len] = 0;
-    Term *t = arenaAlloc(a, sizeof(Term));
-    t->tag = T_STR; t->u.str.chars = copy; t->u.str.len = len;
-    return t;
-}
 static Term **allocArgs(Arena *a, int n) { return arenaAlloc(a, sizeof(Term *) * (size_t)n); }
 static Term *mkCompoundRaw(Arena *a, Atom functor, int arity, Term **args) {
     Term *t = arenaAlloc(a, sizeof(Term));
@@ -208,6 +201,34 @@ static Term *mkCompoundRaw(Arena *a, Atom functor, int arity, Term **args) {
 static Term *mkCompound1(Arena *a, Atom functor, Term *arg) {
     Term **args = allocArgs(a, 1); args[0] = arg;
     return mkCompoundRaw(a, functor, 1, args);
+}
+// Builds a proper ISO list of character codes ('.'(Code,Tail).../[]) from
+// raw bytes -- what a "..." literal parses to, and what te_text/1 etc.
+// produce. "Codes" are bytes (0-255) here, not Unicode codepoints: te's
+// buffer is raw UTF-8, and this keeps a multi-byte character decomposing
+// the same way whether it came from the buffer or a source literal.
+static Term *mkCodeList(Prolog *pl, const char *chars, size_t len) {
+    Term *list = mkAtomRaw(&pl->query, pl->atomNil);
+    for (size_t i = len; i > 0; i--) {
+        Term **args = allocArgs(&pl->query, 2);
+        args[0] = mkIntRaw(&pl->query, (unsigned char)chars[i - 1]);
+        args[1] = list;
+        list = mkCompoundRaw(&pl->query, pl->atomDot, 2, args);
+    }
+    return list;
+}
+// Builds a list of single-character atoms (atom_chars/2's shape) instead of
+// codes.
+static Term *mkCharList(Prolog *pl, const char *chars, size_t len) {
+    Term *list = mkAtomRaw(&pl->query, pl->atomNil);
+    for (size_t i = len; i > 0; i--) {
+        char one[2] = { chars[i - 1], 0 };
+        Term **args = allocArgs(&pl->query, 2);
+        args[0] = mkAtomRaw(&pl->query, internAtom(pl, one));
+        args[1] = list;
+        list = mkCompoundRaw(&pl->query, pl->atomDot, 2, args);
+    }
+    return list;
 }
 
 static Term *deref(Term *t) {
@@ -248,8 +269,6 @@ static bool unify(Prolog *pl, Term *a, Term *b) {
     case T_ATOM: return a->u.atom == b->u.atom;
     case T_INT:  return a->u.i == b->u.i;
     case T_FLT:  return a->u.f == b->u.f;
-    case T_STR:  return a->u.str.len == b->u.str.len &&
-                        memcmp(a->u.str.chars, b->u.str.chars, a->u.str.len) == 0;
     case T_CMP:
         if (a->u.cmp.functor != b->u.cmp.functor || a->u.cmp.arity != b->u.cmp.arity) return false;
         for (int i = 0; i < a->u.cmp.arity; i++)
@@ -267,8 +286,6 @@ static bool termEq(Term *a, Term *b) {
     case T_ATOM: return a->u.atom == b->u.atom;
     case T_INT:  return a->u.i == b->u.i;
     case T_FLT:  return a->u.f == b->u.f;
-    case T_STR:  return a->u.str.len == b->u.str.len &&
-                        memcmp(a->u.str.chars, b->u.str.chars, a->u.str.len) == 0;
     case T_CMP:
         if (a->u.cmp.functor != b->u.cmp.functor || a->u.cmp.arity != b->u.cmp.arity) return false;
         for (int i = 0; i < a->u.cmp.arity; i++)
@@ -306,7 +323,6 @@ static Term *copyTermRec(Arena *dst, Term *t, VarMap *map) {
     case T_ATOM: return mkAtomRaw(dst, t->u.atom);
     case T_INT:  return mkIntRaw(dst, t->u.i);
     case T_FLT:  return mkFloatRaw(dst, t->u.f);
-    case T_STR:  return mkStringRaw(dst, t->u.str.chars, t->u.str.len);
     case T_CMP: {
         Term **newArgs = allocArgs(dst, t->u.cmp.arity);
         for (int i = 0; i < t->u.cmp.arity; i++)
@@ -342,7 +358,6 @@ static void writeTermBuf(Prolog *pl, Term *t, WBuf *w) {
     case T_ATOM: wputs(w, atomName(pl, t->u.atom)); break;
     case T_INT: snprintf(tmp, sizeof tmp, "%ld", t->u.i); wputs(w, tmp); break;
     case T_FLT: snprintf(tmp, sizeof tmp, "%g", t->u.f); wputs(w, tmp); break;
-    case T_STR: wputn(w, t->u.str.chars, t->u.str.len); break;
     case T_CMP:
         if (t->u.cmp.functor == pl->atomDot && t->u.cmp.arity == 2) {
             wputs(w, "[");
@@ -379,11 +394,60 @@ static void writeTerm(Prolog *pl, Term *t, char *buf, size_t bufsz) {
     writeTermBuf(pl, t, &w);
 }
 
+// Renders an ISO error(Formal, Context) ball into readable text for
+// editorEcho -- not a certified-conformance message wording, just enough to
+// be useful. Falls back to a generic term dump for anything else (a user's
+// own throw(whatever), or an unrecognized Formal shape).
 static void formatBallMessage(Prolog *pl, Term *ball, char *buf, size_t bufsz) {
     Term *b = deref(ball);
-    if (b->tag == T_CMP && b->u.cmp.arity == 1 && b->u.cmp.functor == pl->atomError) {
-        Term *msg = deref(b->u.cmp.args[0]);
-        if (msg->tag == T_STR) { snprintf(buf, bufsz, "%.*s", (int)msg->u.str.len, msg->u.str.chars); return; }
+    if (!(b->tag == T_CMP && b->u.cmp.arity == 2 && b->u.cmp.functor == pl->atomError)) {
+        writeTerm(pl, b, buf, bufsz);
+        return;
+    }
+    Term *formal = deref(b->u.cmp.args[0]);
+    const char *fn = formal->tag == T_ATOM ? atomName(pl, formal->u.atom)
+                    : formal->tag == T_CMP ? atomName(pl, formal->u.cmp.functor) : NULL;
+    if (fn && formal->tag == T_ATOM && streq(fn, "instantiation_error")) {
+        snprintf(buf, bufsz, "instantiation error"); return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 2 && streq(fn, "type_error")) {
+        char typeBuf[64], culpritBuf[200];
+        writeTerm(pl, formal->u.cmp.args[0], typeBuf, sizeof typeBuf);
+        writeTerm(pl, formal->u.cmp.args[1], culpritBuf, sizeof culpritBuf);
+        snprintf(buf, bufsz, "type error: expected %s, got %s", typeBuf, culpritBuf);
+        return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 2 && streq(fn, "domain_error")) {
+        char domBuf[64], culpritBuf[200];
+        writeTerm(pl, formal->u.cmp.args[0], domBuf, sizeof domBuf);
+        writeTerm(pl, formal->u.cmp.args[1], culpritBuf, sizeof culpritBuf);
+        snprintf(buf, bufsz, "domain error: expected %s, got %s", domBuf, culpritBuf);
+        return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 2 && streq(fn, "existence_error")) {
+        char typeBuf[64], culpritBuf[200];
+        writeTerm(pl, formal->u.cmp.args[0], typeBuf, sizeof typeBuf);
+        writeTerm(pl, formal->u.cmp.args[1], culpritBuf, sizeof culpritBuf);
+        snprintf(buf, bufsz, "existence error: %s %s does not exist", typeBuf, culpritBuf);
+        return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 3 && streq(fn, "permission_error")) {
+        char opBuf[64], typeBuf[64], culpritBuf[200];
+        writeTerm(pl, formal->u.cmp.args[0], opBuf, sizeof opBuf);
+        writeTerm(pl, formal->u.cmp.args[1], typeBuf, sizeof typeBuf);
+        writeTerm(pl, formal->u.cmp.args[2], culpritBuf, sizeof culpritBuf);
+        snprintf(buf, bufsz, "permission error: no permission to %s %s %s", opBuf, typeBuf, culpritBuf);
+        return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 1 && streq(fn, "evaluation_error")) {
+        char whatBuf[64];
+        writeTerm(pl, formal->u.cmp.args[0], whatBuf, sizeof whatBuf);
+        snprintf(buf, bufsz, "evaluation error: %s", whatBuf);
+        return;
+    }
+    if (fn && formal->tag == T_CMP && formal->u.cmp.arity == 1 && streq(fn, "te_error")) {
+        Term *msg = deref(formal->u.cmp.args[0]);
+        if (msg->tag == T_ATOM) { snprintf(buf, bufsz, "%s", atomName(pl, msg->u.atom)); return; }
     }
     writeTerm(pl, b, buf, bufsz);
 }
@@ -392,7 +456,11 @@ static void reportPlainError(Prolog *pl, const char *msg) {
     if (pl->errorFn) pl->errorFn(msg, pl->errorCtx);
 }
 
-// --- throw / errors ---------------------------------------------------
+// --- throw / ISO structured errors -----------------------------------
+// Every engine-raised error is a standard error(Formal, Context) ball
+// (Context left an unbound var -- ISO doesn't mandate its content), built
+// fresh from these typed constructors rather than a printf-style message,
+// so a user's own catch/3 can pattern-match the Formal term.
 
 static _Noreturn void throwBall(Prolog *pl, Term *ball) {
     if (!pl->catchTop) abort(); // invariant: solveTopLevel always installs a frame first
@@ -401,23 +469,50 @@ static _Noreturn void throwBall(Prolog *pl, Term *ball) {
     f->ball = ball;
     longjmp(f->jb, 1);
 }
-
-static _Noreturn void engineErrorV(Prolog *pl, const char *fmt, va_list ap) {
-    char buf[256];
-    vsnprintf(buf, sizeof buf, fmt, ap);
-    Term *msg = mkStringRaw(&pl->query, buf, strlen(buf));
-    Term *ball = mkCompound1(&pl->query, pl->atomError, msg);
-    throwBall(pl, ball);
+static _Noreturn void throwFormal(Prolog *pl, Term *formal) {
+    Term *ctx = newVar(&pl->query);
+    Term **args = allocArgs(&pl->query, 2);
+    args[0] = formal; args[1] = ctx;
+    throwBall(pl, mkCompoundRaw(&pl->query, pl->atomError, 2, args));
 }
-static _Noreturn void engineError(Prolog *pl, const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    engineErrorV(pl, fmt, ap);
-    va_end(ap); // unreachable, silences "unused" warnings on some compilers
-    abort();
+static _Noreturn void throwInstantiationError(Prolog *pl) {
+    throwFormal(pl, mkAtomRaw(&pl->query, internAtom(pl, "instantiation_error")));
+}
+static _Noreturn void throwTypeError(Prolog *pl, const char *validType, Term *culprit) {
+    Term **a = allocArgs(&pl->query, 2);
+    a[0] = mkAtomRaw(&pl->query, internAtom(pl, validType));
+    a[1] = culprit;
+    throwFormal(pl, mkCompoundRaw(&pl->query, internAtom(pl, "type_error"), 2, a));
+}
+static _Noreturn void throwDomainError(Prolog *pl, const char *domain, Term *culprit) {
+    Term **a = allocArgs(&pl->query, 2);
+    a[0] = mkAtomRaw(&pl->query, internAtom(pl, domain));
+    a[1] = culprit;
+    throwFormal(pl, mkCompoundRaw(&pl->query, internAtom(pl, "domain_error"), 2, a));
+}
+static Term *mkSlash(Prolog *pl, Atom name, int arity) {
+    Term **a = allocArgs(&pl->query, 2);
+    a[0] = mkAtomRaw(&pl->query, name);
+    a[1] = mkIntRaw(&pl->query, arity);
+    return mkCompoundRaw(&pl->query, internAtom(pl, "/"), 2, a);
+}
+static _Noreturn void throwExistenceError(Prolog *pl, const char *objType, Term *culprit) {
+    Term **a = allocArgs(&pl->query, 2);
+    a[0] = mkAtomRaw(&pl->query, internAtom(pl, objType));
+    a[1] = culprit;
+    throwFormal(pl, mkCompoundRaw(&pl->query, internAtom(pl, "existence_error"), 2, a));
+}
+static _Noreturn void throwEvaluationError(Prolog *pl, const char *what) {
+    throwFormal(pl, mkCompound1(&pl->query, internAtom(pl, "evaluation_error"),
+                                 mkAtomRaw(&pl->query, internAtom(pl, what))));
 }
 
+// Not an ISO formal error, but follows the same error(Formal, Context)
+// wrapping convention (common practice for implementation-specific errors).
+// Used by native te_* predicates in script.c via the public API.
 _Noreturn void prologThrowMsg(Prolog *pl, const char *message) {
-    engineError(pl, "%s", message);
+    Term *msgAtom = mkAtomRaw(&pl->query, internAtom(pl, message));
+    throwFormal(pl, mkCompound1(&pl->query, internAtom(pl, "te_error"), msgAtom));
 }
 
 // --- arithmetic ---------------------------------------------------------
@@ -429,7 +524,7 @@ static Num evalArith(Prolog *pl, Term *t) {
     t = deref(t);
     if (t->tag == T_INT) return (Num){ false, t->u.i, 0 };
     if (t->tag == T_FLT) return (Num){ true, 0, t->u.f };
-    if (t->tag == T_VAR) engineError(pl, "arithmetic: unbound variable");
+    if (t->tag == T_VAR) throwInstantiationError(pl);
     if (t->tag == T_CMP) {
         const char *f = atomName(pl, t->u.cmp.functor);
         int ar = t->u.cmp.arity;
@@ -447,13 +542,13 @@ static Num evalArith(Prolog *pl, Term *t) {
             if (streq(f, "*")) return fl ? (Num){ true, 0, numAsF(a) * numAsF(b) } : (Num){ false, a.i * b.i, 0 };
             if (streq(f, "/")) return (Num){ true, 0, numAsF(a) / numAsF(b) };
             if (streq(f, "//")) {
-                if (fl) engineError(pl, "// requires integers");
-                if (b.i == 0) engineError(pl, "division by zero");
+                if (fl) throwTypeError(pl, "integer", mkFloatRaw(&pl->query, a.isFloat ? a.f : b.f));
+                if (b.i == 0) throwEvaluationError(pl, "zero_divisor");
                 return (Num){ false, a.i / b.i, 0 };
             }
             if (streq(f, "mod")) {
-                if (fl) engineError(pl, "mod requires integers");
-                if (b.i == 0) engineError(pl, "division by zero");
+                if (fl) throwTypeError(pl, "integer", mkFloatRaw(&pl->query, a.isFloat ? a.f : b.f));
+                if (b.i == 0) throwEvaluationError(pl, "zero_divisor");
                 long m = a.i % b.i;
                 if (m != 0 && ((m < 0) != (b.i < 0))) m += b.i;
                 return (Num){ false, m, 0 };
@@ -462,16 +557,84 @@ static Num evalArith(Prolog *pl, Term *t) {
             if (streq(f, "max")) return numAsF(a) > numAsF(b) ? a : b;
         }
     }
-    engineError(pl, "arithmetic: not evaluable");
+    if (t->tag == T_ATOM) throwTypeError(pl, "evaluable", mkSlash(pl, t->u.atom, 0));
+    throwTypeError(pl, "evaluable", mkSlash(pl, t->u.cmp.functor, t->u.cmp.arity));
 }
 
-// --- getText (atom or string -> chars, for key/mod names, te_* args) -----
+// --- getTextFlexible (atom or proper code list -> chars) -----------------
+// Accepts either an atom (key/mod names, te_action, atom_concat, ...) or a
+// proper ISO code list (what "..." now parses to) and returns a pointer to
+// a NUL-terminated byte run: for an atom, straight into the atom table; for
+// a code list, materialized into a fresh query-arena buffer (transient,
+// reclaimed at the next mark/reset like everything else a query builds).
+// Returns false if `t` is neither (a bare compound, an improper list, a
+// list containing something other than an integer 0-255, ...).
 
-static bool getText(Prolog *pl, Term *t, const char **out, size_t *outLen) {
+static bool getTextFlexible(Prolog *pl, Term *t, const char **out, size_t *outLen) {
     t = deref(t);
     if (t->tag == T_ATOM) { const char *n = atomName(pl, t->u.atom); *out = n; *outLen = strlen(n); return true; }
-    if (t->tag == T_STR) { *out = t->u.str.chars; *outLen = t->u.str.len; return true; }
-    return false;
+    size_t count = 0;
+    Term *cur = t;
+    for (;;) {
+        if (cur->tag == T_CMP && cur->u.cmp.functor == pl->atomDot && cur->u.cmp.arity == 2) {
+            Term *head = deref(cur->u.cmp.args[0]);
+            if (head->tag != T_INT || head->u.i < 0 || head->u.i > 255) return false;
+            count++;
+            cur = deref(cur->u.cmp.args[1]);
+        } else break;
+    }
+    if (!(cur->tag == T_ATOM && cur->u.atom == pl->atomNil)) return false;
+    char *buf = arenaAlloc(&pl->query, count + 1);
+    size_t i = 0;
+    cur = t;
+    while (cur->tag == T_CMP && cur->u.cmp.functor == pl->atomDot && cur->u.cmp.arity == 2) {
+        buf[i++] = (char)(unsigned char)deref(cur->u.cmp.args[0])->u.i;
+        cur = deref(cur->u.cmp.args[1]);
+    }
+    buf[count] = 0;
+    *out = buf; *outLen = count;
+    return true;
+}
+// Walks a proper list of single-character atoms (atom_chars/2's input
+// shape) into a caller-supplied buffer.
+static bool getCharListText(Prolog *pl, Term *t, char *buf, size_t bufcap, size_t *outLen) {
+    t = deref(t);
+    size_t o = 0;
+    while (t->tag == T_CMP && t->u.cmp.functor == pl->atomDot && t->u.cmp.arity == 2) {
+        Term *head = deref(t->u.cmp.args[0]);
+        if (head->tag != T_ATOM) return false;
+        const char *n = atomName(pl, head->u.atom);
+        if (strlen(n) != 1) return false;
+        if (o < bufcap) buf[o] = n[0];
+        o++;
+        t = deref(t->u.cmp.args[1]);
+    }
+    if (!(t->tag == T_ATOM && t->u.atom == pl->atomNil)) return false;
+    *outLen = o < bufcap ? o : bufcap;
+    return true;
+}
+// Collects a proper list's elements into a fresh malloc'd C array (caller
+// frees). Returns false if `list` isn't a proper list.
+static bool collectList(Prolog *pl, Term *list, Term ***outItems, size_t *outCount) {
+    Term **items = NULL; size_t count = 0, cap = 0;
+    Term *cur = deref(list);
+    while (cur->tag == T_CMP && cur->u.cmp.functor == pl->atomDot && cur->u.cmp.arity == 2) {
+        if (count == cap) { cap = cap ? cap * 2 : 8; items = realloc(items, cap * sizeof(Term *)); }
+        items[count++] = cur->u.cmp.args[0];
+        cur = deref(cur->u.cmp.args[1]);
+    }
+    if (!(cur->tag == T_ATOM && cur->u.atom == pl->atomNil)) { free(items); return false; }
+    *outItems = items; *outCount = count;
+    return true;
+}
+static Term *buildList(Prolog *pl, Term **items, size_t count) {
+    Term *list = mkAtomRaw(&pl->query, pl->atomNil);
+    for (size_t i = count; i > 0; i--) {
+        Term **args = allocArgs(&pl->query, 2);
+        args[0] = items[i - 1]; args[1] = list;
+        list = mkCompoundRaw(&pl->query, pl->atomDot, 2, args);
+    }
+    return list;
 }
 
 // --- predicate database ---------------------------------------------------
@@ -498,7 +661,7 @@ static void addClause(Prolog *pl, Term *head, Term *body, bool atEnd) {
     Atom functor; int arity;
     if (head->tag == T_ATOM) { functor = head->u.atom; arity = 0; }
     else if (head->tag == T_CMP) { functor = head->u.cmp.functor; arity = head->u.cmp.arity; }
-    else engineError(pl, "assert: clause head must be callable");
+    else throwTypeError(pl, "callable", head);
     Predicate *pred = findOrCreatePred(pl, functor, arity);
     Clause *c = arenaAlloc(&pl->program, sizeof(Clause));
     c->head = head; c->body = body; c->next = NULL;
@@ -533,6 +696,7 @@ void prologRegisterNative(Prolog *pl, const char *name, int arity, PrologNative 
 
 typedef bool (*SolveCont)(Prolog *pl, void *ctx);
 static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skctx);
+static void consultBuffer(Prolog *pl, const char *buf, size_t len);
 
 static bool scAcceptFirst(Prolog *pl, void *ctx) { (void)pl; (void)ctx; return true; }
 
@@ -553,11 +717,11 @@ static bool conjCont(Prolog *pl, void *ctx) {
 
 static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skctx) {
     goal = deref(goal);
-    if (goal->tag == T_VAR) engineError(pl, "instantiation error: unbound goal");
+    if (goal->tag == T_VAR) throwInstantiationError(pl);
     Atom functor; int arity; Term **args;
     if (goal->tag == T_ATOM) { functor = goal->u.atom; arity = 0; args = NULL; }
     else if (goal->tag == T_CMP) { functor = goal->u.cmp.functor; arity = goal->u.cmp.arity; args = goal->u.cmp.args; }
-    else engineError(pl, "type error: callable expected");
+    else throwTypeError(pl, "callable", goal);
 
     if (functor == pl->atomComma && arity == 2) {
         ConjCtx cc = { args[1], barrier, sc, skctx };
@@ -602,7 +766,7 @@ static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skct
             Atom bf; int bar; Term **bargs = NULL;
             if (base->tag == T_ATOM) { bf = base->u.atom; bar = 0; }
             else if (base->tag == T_CMP) { bf = base->u.cmp.functor; bar = base->u.cmp.arity; bargs = base->u.cmp.args; }
-            else { engineError(pl, "call/%d: not callable", arity); }
+            else { throwTypeError(pl, "callable", base); }
             int newArity = bar + extra;
             Term **newArgs = allocArgs(&pl->query, newArity);
             for (int i = 0; i < bar; i++) newArgs[i] = bargs[i];
@@ -640,7 +804,7 @@ static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skct
     if (ne) return ne->fn(pl, args, arity, ne->ctx) ? sc(pl, skctx) : false;
 
     Predicate *pred = findPred(pl, functor, arity);
-    if (!pred) engineError(pl, "unknown procedure %s/%d", atomName(pl, functor), arity);
+    if (!pred) throwExistenceError(pl, "procedure", mkSlash(pl, functor, arity));
 
     long myBarrier = pl->nextBarrier++;
     for (Clause *c = pred->first; c; c = c->next) {
@@ -787,45 +951,29 @@ static bool nativeFindall(Prolog *pl, Term **a, int arity, void *ctx) {
     return unify(pl, a[2], list);
 }
 
+// atom_concat/3: construct-only (both inputs bound) -- ISO also allows a
+// nondeterministic decompose mode (Atom3 bound, Atom1/Atom2 unbound,
+// backtracking over every split); not supported here, noted as a deviation.
 static bool nativeAtomConcat(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
     const char *x, *y; size_t xl, yl;
-    if (!getText(pl, a[0], &x, &xl) || !getText(pl, a[1], &y, &yl))
-        engineError(pl, "atom_concat/3: both arguments must be bound (decomposition mode isn't supported)");
+    Term *A0 = deref(a[0]), *A1 = deref(a[1]);
+    if (A0->tag == T_VAR || A1->tag == T_VAR) throwInstantiationError(pl);
+    if (!getTextFlexible(pl, A0, &x, &xl)) throwTypeError(pl, "atomic", A0);
+    if (!getTextFlexible(pl, A1, &y, &yl)) throwTypeError(pl, "atomic", A1);
     char *buf = malloc(xl + yl + 1);
     memcpy(buf, x, xl); memcpy(buf + xl, y, yl); buf[xl + yl] = 0;
     Term *r = mkAtomRaw(&pl->query, internAtom(pl, buf));
     free(buf);
     return unify(pl, a[2], r);
 }
-static bool nativeStringConcat(Prolog *pl, Term **a, int arity, void *ctx) {
-    (void)arity; (void)ctx;
-    const char *x, *y; size_t xl, yl;
-    if (!getText(pl, a[0], &x, &xl) || !getText(pl, a[1], &y, &yl))
-        engineError(pl, "string_concat/3: both arguments must be bound");
-    char *buf = malloc(xl + yl);
-    memcpy(buf, x, xl); memcpy(buf + xl, y, yl);
-    Term *r = mkStringRaw(&pl->query, buf, xl + yl);
-    free(buf);
-    return unify(pl, a[2], r);
-}
 static bool nativeAtomLength(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
-    const char *s; size_t len;
-    if (!getText(pl, a[0], &s, &len)) engineError(pl, "atom_length/2: first argument must be bound");
-    return unify(pl, a[1], mkIntRaw(&pl->query, (long)len));
-}
-static bool nativeAtomString(Prolog *pl, Term **a, int arity, void *ctx) {
-    (void)arity; (void)ctx;
     Term *A = deref(a[0]);
-    if (A->tag != T_VAR) {
-        const char *s; size_t len;
-        if (!getText(pl, A, &s, &len)) engineError(pl, "atom_string/2: not atomic");
-        return unify(pl, a[1], mkStringRaw(&pl->query, s, len));
-    }
+    if (A->tag == T_VAR) throwInstantiationError(pl);
     const char *s; size_t len;
-    if (!getText(pl, a[1], &s, &len)) engineError(pl, "atom_string/2: second argument must be bound when the first is unbound");
-    return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, s)));
+    if (!getTextFlexible(pl, A, &s, &len)) throwTypeError(pl, "atomic", A);
+    return unify(pl, a[1], mkIntRaw(&pl->query, (long)len));
 }
 static bool parseNum(const char *txt, size_t len, Num *out) {
     char buf[64]; size_t n = len < 63 ? len : 63;
@@ -842,7 +990,7 @@ static bool nativeAtomNumber(Prolog *pl, Term **a, int arity, void *ctx) {
     Term *A = deref(a[0]);
     if (A->tag != T_VAR) {
         const char *txt; size_t len;
-        if (!getText(pl, A, &txt, &len)) return false;
+        if (!getTextFlexible(pl, A, &txt, &len)) throwTypeError(pl, "atomic", A);
         Num n;
         if (!parseNum(txt, len, &n)) return false;
         return unify(pl, a[1], n.isFloat ? mkFloatRaw(&pl->query, n.f) : mkIntRaw(&pl->query, n.i));
@@ -851,43 +999,280 @@ static bool nativeAtomNumber(Prolog *pl, Term **a, int arity, void *ctx) {
     char buf[64];
     if (N->tag == T_INT) snprintf(buf, sizeof buf, "%ld", N->u.i);
     else if (N->tag == T_FLT) snprintf(buf, sizeof buf, "%g", N->u.f);
-    else engineError(pl, "atom_number/2: second argument must be a number when the first is unbound");
+    else throwInstantiationError(pl);
     return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, buf)));
 }
-static bool nativeNumberString(Prolog *pl, Term **a, int arity, void *ctx) {
+static bool nativeAtomCodes(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *A = deref(a[0]);
+    if (A->tag != T_VAR) {
+        const char *s; size_t len;
+        if (!getTextFlexible(pl, A, &s, &len)) throwTypeError(pl, "atomic", A);
+        return unify(pl, a[1], mkCodeList(pl, s, len));
+    }
+    const char *s; size_t len;
+    if (!getTextFlexible(pl, a[1], &s, &len)) throwInstantiationError(pl);
+    return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, s)));
+}
+static bool nativeAtomChars(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *A = deref(a[0]);
+    if (A->tag != T_VAR) {
+        const char *s; size_t len;
+        if (!getTextFlexible(pl, A, &s, &len)) throwTypeError(pl, "atomic", A);
+        return unify(pl, a[1], mkCharList(pl, s, len));
+    }
+    char buf[256]; size_t len;
+    if (!getCharListText(pl, a[1], buf, sizeof buf, &len)) throwInstantiationError(pl);
+    char nbuf[257]; memcpy(nbuf, buf, len); nbuf[len] = 0;
+    return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, nbuf)));
+}
+static bool nativeCharCode(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *C = deref(a[0]);
+    if (C->tag == T_ATOM) {
+        const char *n = atomName(pl, C->u.atom);
+        if (strlen(n) != 1) throwTypeError(pl, "character", C);
+        return unify(pl, a[1], mkIntRaw(&pl->query, (unsigned char)n[0]));
+    }
+    Term *Code = deref(a[1]);
+    if (Code->tag != T_INT) throwInstantiationError(pl);
+    char buf[2] = { (char)Code->u.i, 0 };
+    return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, buf)));
+}
+static bool nativeNumberCodes(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
     Term *N = deref(a[0]);
     if (N->tag == T_INT || N->tag == T_FLT) {
         char buf[64];
         if (N->tag == T_INT) snprintf(buf, sizeof buf, "%ld", N->u.i);
         else snprintf(buf, sizeof buf, "%g", N->u.f);
-        return unify(pl, a[1], mkStringRaw(&pl->query, buf, strlen(buf)));
+        return unify(pl, a[1], mkCodeList(pl, buf, strlen(buf)));
     }
-    const char *txt; size_t len;
-    if (!getText(pl, a[1], &txt, &len)) engineError(pl, "number_string/2: second argument must be bound when the first isn't a number");
+    const char *s; size_t len;
+    if (!getTextFlexible(pl, a[1], &s, &len)) throwInstantiationError(pl);
     Num n;
-    if (!parseNum(txt, len, &n)) return false;
+    if (!parseNum(s, len, &n)) throwTypeError(pl, "number", a[1]);
     return unify(pl, a[0], n.isFloat ? mkFloatRaw(&pl->query, n.f) : mkIntRaw(&pl->query, n.i));
 }
+static bool nativeNumberChars(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *N = deref(a[0]);
+    if (N->tag == T_INT || N->tag == T_FLT) {
+        char buf[64];
+        if (N->tag == T_INT) snprintf(buf, sizeof buf, "%ld", N->u.i);
+        else snprintf(buf, sizeof buf, "%g", N->u.f);
+        return unify(pl, a[1], mkCharList(pl, buf, strlen(buf)));
+    }
+    char buf[64]; size_t len;
+    if (!getCharListText(pl, a[1], buf, sizeof buf, &len)) throwInstantiationError(pl);
+    Num n;
+    if (!parseNum(buf, len, &n)) throwTypeError(pl, "number", a[1]);
+    return unify(pl, a[0], n.isFloat ? mkFloatRaw(&pl->query, n.f) : mkIntRaw(&pl->query, n.i));
+}
+static bool nativeLength(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *L = deref(a[0]);
+    if (L->tag != T_VAR) {
+        Term **items; size_t count;
+        if (!collectList(pl, L, &items, &count)) throwTypeError(pl, "list", L);
+        free(items);
+        return unify(pl, a[1], mkIntRaw(&pl->query, (long)count));
+    }
+    Term *N = deref(a[1]);
+    if (N->tag != T_INT || N->u.i < 0) throwTypeError(pl, "integer", N);
+    Term *list = mkAtomRaw(&pl->query, pl->atomNil);
+    for (long i = 0; i < N->u.i; i++) {
+        Term **args = allocArgs(&pl->query, 2);
+        args[0] = newVar(&pl->query); args[1] = list;
+        list = mkCompoundRaw(&pl->query, pl->atomDot, 2, args);
+    }
+    return unify(pl, a[0], list);
+}
+static bool nativeFunctor(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *T = deref(a[0]);
+    if (T->tag != T_VAR) {
+        Term *name; long ar;
+        if (T->tag == T_CMP) { name = mkAtomRaw(&pl->query, T->u.cmp.functor); ar = T->u.cmp.arity; }
+        else { name = T; ar = 0; }
+        return unify(pl, a[1], name) && unify(pl, a[2], mkIntRaw(&pl->query, ar));
+    }
+    Term *Name = deref(a[1]), *ArT = deref(a[2]);
+    if (Name->tag == T_VAR || ArT->tag == T_VAR) throwInstantiationError(pl);
+    if (ArT->tag != T_INT) throwTypeError(pl, "integer", ArT);
+    if (ArT->u.i == 0) return unify(pl, a[0], Name);
+    if (Name->tag != T_ATOM) throwTypeError(pl, "atom", Name);
+    Term **args = allocArgs(&pl->query, (int)ArT->u.i);
+    for (long i = 0; i < ArT->u.i; i++) args[i] = newVar(&pl->query);
+    return unify(pl, a[0], mkCompoundRaw(&pl->query, Name->u.atom, (int)ArT->u.i, args));
+}
+static bool nativeUniv(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *T = deref(a[0]);
+    if (T->tag != T_VAR) {
+        Term *list;
+        if (T->tag == T_CMP) {
+            list = mkAtomRaw(&pl->query, pl->atomNil);
+            for (int i = T->u.cmp.arity; i >= 1; i--) {
+                Term **cargs = allocArgs(&pl->query, 2);
+                cargs[0] = T->u.cmp.args[i - 1]; cargs[1] = list;
+                list = mkCompoundRaw(&pl->query, pl->atomDot, 2, cargs);
+            }
+            Term **cargs = allocArgs(&pl->query, 2);
+            cargs[0] = mkAtomRaw(&pl->query, T->u.cmp.functor); cargs[1] = list;
+            list = mkCompoundRaw(&pl->query, pl->atomDot, 2, cargs);
+        } else {
+            Term **cargs = allocArgs(&pl->query, 2);
+            cargs[0] = T; cargs[1] = mkAtomRaw(&pl->query, pl->atomNil);
+            list = mkCompoundRaw(&pl->query, pl->atomDot, 2, cargs);
+        }
+        return unify(pl, a[1], list);
+    }
+    Term *L = deref(a[1]);
+    if (!(L->tag == T_CMP && L->u.cmp.functor == pl->atomDot && L->u.cmp.arity == 2)) throwInstantiationError(pl);
+    Term *head = deref(L->u.cmp.args[0]);
+    Term *rest = deref(L->u.cmp.args[1]);
+    if (rest->tag == T_ATOM && rest->u.atom == pl->atomNil) return unify(pl, a[0], head);
+    if (head->tag != T_ATOM) throwTypeError(pl, "atom", head);
+    Term **items; size_t count;
+    if (!collectList(pl, rest, &items, &count)) throwTypeError(pl, "list", rest);
+    Term **cargs = allocArgs(&pl->query, (int)count);
+    memcpy(cargs, items, count * sizeof(Term *));
+    free(items);
+    return unify(pl, a[0], mkCompoundRaw(&pl->query, head->u.atom, (int)count, cargs));
+}
+static bool nativeArg(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *N = deref(a[0]), *T = deref(a[1]);
+    if (N->tag == T_VAR || T->tag == T_VAR) throwInstantiationError(pl);
+    if (N->tag != T_INT) throwTypeError(pl, "integer", N);
+    if (T->tag != T_CMP) throwTypeError(pl, "compound", T);
+    if (N->u.i < 1 || N->u.i > T->u.cmp.arity) return false;
+    return unify(pl, a[2], T->u.cmp.args[N->u.i - 1]);
+}
+static bool nativeCopyTerm(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return unify(pl, a[1], copyTermFresh(&pl->query, a[0]));
+}
+static bool nativeSucc(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term *X = deref(a[0]), *Y = deref(a[1]);
+    if (X->tag == T_INT) {
+        if (X->u.i < 0) throwDomainError(pl, "not_less_than_zero", X);
+        return unify(pl, a[1], mkIntRaw(&pl->query, X->u.i + 1));
+    }
+    if (Y->tag == T_INT) {
+        if (Y->u.i < 0) throwDomainError(pl, "not_less_than_zero", Y);
+        if (Y->u.i == 0) return false;
+        return unify(pl, a[0], mkIntRaw(&pl->query, Y->u.i - 1));
+    }
+    throwInstantiationError(pl);
+}
+
+// --- standard order of terms: Var @< Number @< Atom @< Compound ----------
+
+static int termOrder(Prolog *pl, Term *a, Term *b) {
+    a = deref(a); b = deref(b);
+    int ra = a->tag == T_VAR ? 0 : (a->tag == T_INT || a->tag == T_FLT) ? 1 : a->tag == T_ATOM ? 2 : 3;
+    int rb = b->tag == T_VAR ? 0 : (b->tag == T_INT || b->tag == T_FLT) ? 1 : b->tag == T_ATOM ? 2 : 3;
+    if (ra != rb) return ra < rb ? -1 : 1;
+    switch (ra) {
+    case 0: return a == b ? 0 : (a < b ? -1 : 1); // distinct vars: stable pointer order
+    case 1: {
+        double av = a->tag == T_FLT ? a->u.f : (double)a->u.i;
+        double bv = b->tag == T_FLT ? b->u.f : (double)b->u.i;
+        if (av < bv) return -1;
+        if (av > bv) return 1;
+        bool af = a->tag == T_FLT, bf = b->tag == T_FLT;
+        return af == bf ? 0 : (af ? -1 : 1); // equal value: float @< int, per ISO
+    }
+    case 2: {
+        int c = strcmp(atomName(pl, a->u.atom), atomName(pl, b->u.atom));
+        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    }
+    default: {
+        if (a->u.cmp.arity != b->u.cmp.arity) return a->u.cmp.arity < b->u.cmp.arity ? -1 : 1;
+        int c = strcmp(atomName(pl, a->u.cmp.functor), atomName(pl, b->u.cmp.functor));
+        if (c != 0) return c < 0 ? -1 : 1;
+        for (int i = 0; i < a->u.cmp.arity; i++) {
+            int r = termOrder(pl, a->u.cmp.args[i], b->u.cmp.args[i]);
+            if (r != 0) return r;
+        }
+        return 0;
+    }
+    }
+}
+static bool nativeCompare(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    int c = termOrder(pl, a[1], a[2]);
+    const char *sym = c < 0 ? "<" : c > 0 ? ">" : "=";
+    return unify(pl, a[0], mkAtomRaw(&pl->query, internAtom(pl, sym)));
+}
+static bool nativeOrderCmp(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity;
+    const char *op = (const char *)ctx;
+    int c = termOrder(pl, a[0], a[1]);
+    if (streq(op, "@<")) return c < 0;
+    if (streq(op, "@=<")) return c <= 0;
+    if (streq(op, "@>")) return c > 0;
+    return c >= 0; // "@>="
+}
+// Insertion sort (config-scale lists -- O(n^2) is plenty fast here, and it
+// keeps termOrder's Prolog* in scope without qsort's non-reentrant
+// comparator signature).
+static void sortTerms(Prolog *pl, Term **items, size_t n) {
+    for (size_t i = 1; i < n; i++) {
+        Term *key = items[i];
+        size_t j = i;
+        while (j > 0 && termOrder(pl, items[j - 1], key) > 0) { items[j] = items[j - 1]; j--; }
+        items[j] = key;
+    }
+}
+static bool nativeMsort(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term **items; size_t count;
+    if (!collectList(pl, a[0], &items, &count)) throwTypeError(pl, "list", a[0]);
+    sortTerms(pl, items, count);
+    Term *r = buildList(pl, items, count);
+    free(items);
+    return unify(pl, a[1], r);
+}
+static bool nativeSort(Prolog *pl, Term **a, int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    Term **items; size_t count;
+    if (!collectList(pl, a[0], &items, &count)) throwTypeError(pl, "list", a[0]);
+    sortTerms(pl, items, count);
+    size_t w = 0;
+    for (size_t i = 0; i < count; i++)
+        if (w == 0 || termOrder(pl, items[w - 1], items[i]) != 0) items[w++] = items[i];
+    Term *r = buildList(pl, items, w);
+    free(items);
+    return unify(pl, a[1], r);
+}
+
 static bool nativeGetTime(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
     return unify(pl, a[0], mkFloatRaw(&pl->query, (double)time(NULL)));
 }
+// Not ISO -- no standard predicate for wall-clock time exists -- but kept as
+// a clearly-flagged, necessary extension (see get_time/1): dropping
+// date-stamping entirely would gut docs/init.pl.example's usefulness.
 static bool nativeFormatTime(Prolog *pl, Term **a, int arity, void *ctx) {
     (void)arity; (void)ctx;
     const char *fmt; size_t fmtLen;
-    if (!getText(pl, a[1], &fmt, &fmtLen)) engineError(pl, "format_time/3: format must be an atom or string");
+    if (!getTextFlexible(pl, a[1], &fmt, &fmtLen)) throwInstantiationError(pl);
     Term *ts = deref(a[2]);
     time_t tt;
     if (ts->tag == T_INT) tt = (time_t)ts->u.i;
     else if (ts->tag == T_FLT) tt = (time_t)ts->u.f;
-    else engineError(pl, "format_time/3: timestamp must be a number (see get_time/1)");
+    else throwTypeError(pl, "number", ts);
     char fmtBuf[128]; size_t fl = fmtLen < 127 ? fmtLen : 127;
     memcpy(fmtBuf, fmt, fl); fmtBuf[fl] = 0;
     struct tm tmv = *localtime(&tt); // te is single-threaded; localtime's static buffer is fine here
     char out[256];
     size_t n = strftime(out, sizeof out, fmtBuf, &tmv);
-    return unify(pl, a[0], mkStringRaw(&pl->query, out, n));
+    return unify(pl, a[0], mkCodeList(pl, out, n));
 }
 
 static void registerStdlib(Prolog *pl) {
@@ -907,12 +1292,26 @@ static void registerStdlib(Prolog *pl) {
     prologRegisterNative(pl, "retract", 1, nativeRetract, NULL);
     prologRegisterNative(pl, "findall", 3, nativeFindall, NULL);
     prologRegisterNative(pl, "atom_concat", 3, nativeAtomConcat, NULL);
-    prologRegisterNative(pl, "string_concat", 3, nativeStringConcat, NULL);
     prologRegisterNative(pl, "atom_length", 2, nativeAtomLength, NULL);
-    prologRegisterNative(pl, "string_length", 2, nativeAtomLength, NULL);
-    prologRegisterNative(pl, "atom_string", 2, nativeAtomString, NULL);
     prologRegisterNative(pl, "atom_number", 2, nativeAtomNumber, NULL);
-    prologRegisterNative(pl, "number_string", 2, nativeNumberString, NULL);
+    prologRegisterNative(pl, "atom_codes", 2, nativeAtomCodes, NULL);
+    prologRegisterNative(pl, "atom_chars", 2, nativeAtomChars, NULL);
+    prologRegisterNative(pl, "char_code", 2, nativeCharCode, NULL);
+    prologRegisterNative(pl, "number_codes", 2, nativeNumberCodes, NULL);
+    prologRegisterNative(pl, "number_chars", 2, nativeNumberChars, NULL);
+    prologRegisterNative(pl, "length", 2, nativeLength, NULL);
+    prologRegisterNative(pl, "functor", 3, nativeFunctor, NULL);
+    prologRegisterNative(pl, "=..", 2, nativeUniv, NULL);
+    prologRegisterNative(pl, "arg", 3, nativeArg, NULL);
+    prologRegisterNative(pl, "copy_term", 2, nativeCopyTerm, NULL);
+    prologRegisterNative(pl, "succ", 2, nativeSucc, NULL);
+    prologRegisterNative(pl, "compare", 3, nativeCompare, NULL);
+    prologRegisterNative(pl, "@<", 2, nativeOrderCmp, "@<");
+    prologRegisterNative(pl, "@=<", 2, nativeOrderCmp, "@=<");
+    prologRegisterNative(pl, "@>", 2, nativeOrderCmp, "@>");
+    prologRegisterNative(pl, "@>=", 2, nativeOrderCmp, "@>=");
+    prologRegisterNative(pl, "sort", 2, nativeSort, NULL);
+    prologRegisterNative(pl, "msort", 2, nativeMsort, NULL);
     prologRegisterNative(pl, "get_time", 1, nativeGetTime, NULL);
     prologRegisterNative(pl, "format_time", 3, nativeFormatTime, NULL);
 }
@@ -1025,7 +1424,8 @@ static void parseQuoted(Parser *p, Token *tok, char q) {
     tok->text[o] = 0; tok->textLen = o;
 }
 static const char *const MULTI_PUNCT[] = {
-    ":-", "->", "\\+", "\\==", "\\=", "==", "=<", ">=", "=:=", "=\\=", "//", NULL
+    ":-", "->", "\\+", "\\==", "\\=", "==", "=<", ">=", "=:=", "=\\=", "//", "=..",
+    "@=<", "@>=", "@<", "@>", NULL
 };
 static void parsePunctOrSymbolic(Parser *p, Token *tok) {
     for (int i = 0; MULTI_PUNCT[i]; i++) {
@@ -1086,7 +1486,8 @@ static const OpDef INFIX_OPS[] = {
     { ",", 1000, true },
     { "=", 700, false }, { "\\=", 700, false }, { "==", 700, false }, { "\\==", 700, false },
     { "is", 700, false }, { "<", 700, false }, { ">", 700, false }, { "=<", 700, false }, { ">=", 700, false },
-    { "=:=", 700, false }, { "=\\=", 700, false },
+    { "=:=", 700, false }, { "=\\=", 700, false }, { "=..", 700, false },
+    { "@<", 700, false }, { "@=<", 700, false }, { "@>", 700, false }, { "@>=", 700, false },
     { "+", 500, false }, { "-", 500, false },
     { "*", 400, false }, { "/", 400, false }, { "//", 400, false }, { "mod", 400, false },
 };
@@ -1124,12 +1525,23 @@ static Term *parseList(Parser *p) {
     return list;
 }
 
+// Symbolic operator atoms usable standalone as a term (not just infix) --
+// e.g. compare/3's '<'/'='/'>' results, or `X = (+)`. Structural delimiters
+// (, ; | . ( ) [ ]) are deliberately excluded -- still reserved punctuation.
+static bool isBareableSymbol(const char *s) {
+    static const char *const SYMS[] = {
+        ":-", "->", "\\+", "\\==", "\\=", "==", "=<", ">=", "=:=", "=\\=", "//", "=..",
+        "@=<", "@>=", "@<", "@>", "=", "<", ">", "+", "-", "*", "/", NULL
+    };
+    for (int i = 0; SYMS[i]; i++) if (streq(s, SYMS[i])) return true;
+    return false;
+}
 static Term *parsePrimary(Parser *p) {
     Token t = p->cur;
     switch (t.kind) {
     case TK_INT: advance(p); return mkIntRaw(p->target, t.ival);
     case TK_FLOAT: advance(p); return mkFloatRaw(p->target, t.fval);
-    case TK_STRING: advance(p); return mkStringRaw(p->target, t.text, t.textLen);
+    case TK_STRING: advance(p); return mkCodeList(p->pl, t.text, t.textLen);
     case TK_VAR: advance(p); return lookupOrCreateVar(p, t.text, t.textLen);
     case TK_ATOM: {
         char name[512]; memcpy(name, t.text, t.textLen + 1);
@@ -1163,6 +1575,7 @@ static Term *parsePrimary(Parser *p) {
         }
         if (streq(t.text, "[")) { advance(p); return parseList(p); }
         if (streq(t.text, "!")) { advance(p); return mkAtomRaw(p->target, p->pl->atomCut); }
+        if (isBareableSymbol(t.text)) { advance(p); return mkAtomRaw(p->target, internAtom(p->pl, t.text)); }
         reportPlainErrorParser(p, "unexpected token");
         advance(p);
         return mkAtomRaw(p->target, p->pl->atomFail);
@@ -1265,6 +1678,14 @@ Prolog *prologCreate(void) {
     pl->atomDot = internAtom(pl, ".");
     pl->atomError = internAtom(pl, "error");
     registerStdlib(pl);
+    // between/3 needs real backtracking (nondeterministic generate-and-test)
+    // that a native predicate's single-bool-return ABI can't express -- it's
+    // bootstrapped as ordinary clauses instead, reusing the existing
+    // clause/backtracking engine as-is.
+    static const char *const BOOTSTRAP_SRC =
+        "between(Low, High, Low) :- Low =< High.\n"
+        "between(Low, High, X) :- Low < High, Low1 is Low + 1, between(Low1, High, X).\n";
+    consultBuffer(pl, BOOTSTRAP_SRC, strlen(BOOTSTRAP_SRC));
     return pl;
 }
 void prologDestroy(Prolog *pl) {
@@ -1282,19 +1703,11 @@ void prologDestroy(Prolog *pl) {
 }
 void prologSetErrorHandler(Prolog *pl, PrologErrorFn fn, void *ctx) { pl->errorFn = fn; pl->errorCtx = ctx; }
 
-void prologConsultFile(Prolog *pl, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return; // a missing file is fine -- not every consult target must exist
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)sz + 1);
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    buf[rd] = 0;
-    fclose(f);
-
+// Parses and loads clauses/directives from a buffer (used by both
+// prologConsultFile and prologCreate's between/3 bootstrap).
+static void consultBuffer(Prolog *pl, const char *buf, size_t len) {
     Parser parser;
-    initParser(&parser, pl, buf, rd, &pl->query);
+    initParser(&parser, pl, buf, len, &pl->query);
     advance(&parser);
     for (;;) {
         ArenaMark mark = arenaMark(&pl->query);
@@ -1320,6 +1733,18 @@ void prologConsultFile(Prolog *pl, const char *path) {
         }
     }
     destroyParser(&parser);
+}
+void prologConsultFile(Prolog *pl, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return; // a missing file is fine -- not every consult target must exist
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)sz + 1);
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    buf[rd] = 0;
+    fclose(f);
+    consultBuffer(pl, buf, rd);
     free(buf);
 }
 
@@ -1374,7 +1799,7 @@ PlTerm *prologArg(Prolog *pl, PlTerm *t, int i) {
     if (t->tag != T_CMP || i < 1 || i > t->u.cmp.arity) return NULL;
     return t->u.cmp.args[i - 1];
 }
-bool prologGetText(Prolog *pl, PlTerm *t, const char **out, size_t *outLen) { return getText(pl, t, out, outLen); }
+bool prologGetText(Prolog *pl, PlTerm *t, const char **out, size_t *outLen) { return getTextFlexible(pl, t, out, outLen); }
 bool prologGetInt(Prolog *pl, PlTerm *t, long *out) {
     (void)pl; t = deref(t);
     if (t->tag != T_INT) return false;
@@ -1383,6 +1808,6 @@ bool prologGetInt(Prolog *pl, PlTerm *t, long *out) {
 }
 
 PlTerm *prologMkAtom(Prolog *pl, const char *name) { return mkAtomRaw(&pl->query, internAtom(pl, name)); }
-PlTerm *prologMkString(Prolog *pl, const char *chars, size_t len) { return mkStringRaw(&pl->query, chars, len); }
+PlTerm *prologMkCodeList(Prolog *pl, const char *chars, size_t len) { return mkCodeList(pl, chars, len); }
 PlTerm *prologMkInt(Prolog *pl, long v) { return mkIntRaw(&pl->query, v); }
 bool prologUnify(Prolog *pl, PlTerm *a, PlTerm *b) { return unify(pl, a, b); }

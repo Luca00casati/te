@@ -37,7 +37,7 @@ insert_date :-
 key_binding(y, ctrl_shift, save_unless_too_big).
 save_unless_too_big :-
     te_text(Text),
-    string_length(Text, Len),
+    length(Text, Len),
     (   Len > 100000
     ->  te_echo("buffer is getting big")
     ;   te_action(save)
@@ -55,7 +55,7 @@ hook(post_save, announce_save).
 announce_save :-
     get_time(T),
     format_time(Now, "%H:%M:%S", T),
-    string_concat("saved at ", Now, Msg),
+    atom_concat("saved at ", Now, Msg),
     te_echo(Msg).
 
 :- te_echo("init.pl loaded").

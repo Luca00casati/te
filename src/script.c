@@ -93,7 +93,7 @@ static bool nTeText(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     size_t n;
     const unsigned char *s = editorGetText(&n);
-    PlTerm *t = prologMkString(p, (const char *)s, n);
+    PlTerm *t = prologMkCodeList(p, (const char *)s, n);
     return prologUnify(p, args[0], t);
 }
 static bool nTeCursor(Prolog *p, PlTerm *args[], int arity, void *ctx) {

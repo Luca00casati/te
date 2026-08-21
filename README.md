@@ -134,7 +134,7 @@ action:
 | `te_action(Name)` | Run a named command (anything in `COMMANDS`, `src/binding.h`) |
 | `te_echo(Msg)` | Write a message to the status line |
 | `te_insert(Text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
-| `te_text(Text)` | Unify `Text` with the whole buffer |
+| `te_text(Text)` | Unify `Text` with the whole buffer, as a list of character codes |
 | `te_cursor(Pos)` / `te_set_cursor(Pos)` | Get/set the cursor as a byte offset |
 
 `Key` is a single-character atom (`g`, `3`) or one of `space`, `enter`,
@@ -142,17 +142,26 @@ action:
 `ctrl_shift` (underscore, not hyphen — a bare Prolog atom can't hold one).
 `Handler` is any goal — a custom predicate, or a direct `te_action(Name)`
 call (action names like `"select-all"` have a hyphen, so pass them as a
-quoted string or atom rather than bare). Script bindings are checked before
-the built-in `BINDINGS`/`PREFIX_BINDINGS` tables, so they can override a
-default; an uncaught error inside a handler is echoed rather than crashing
-`te`.
+quoted `"..."` rather than bare — see below, it works as either an atom or
+text argument). Script bindings are checked before the built-in
+`BINDINGS`/`PREFIX_BINDINGS` tables, so they can override a default; an
+uncaught error inside a handler is echoed rather than crashing `te`.
 
-The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch Prolog**,
-not a wrapper around an external library: facts/rules, unification,
-backtracking, cut (`!`), if-then-else, arithmetic, `catch/3`/`throw/1`,
-`assert`/`retract`, `findall/3`, and a practical-subset parser with a fixed
-infix operator table (no user-defined `op/3`) — enough for real config logic,
-not full ISO Prolog.
+The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch, ISO-flavored
+Prolog**, not a wrapper around an external library: facts/rules, unification,
+backtracking, cut (`!`), if-then-else, arithmetic, structured ISO error terms
+(`error(type_error(...), _)`, `instantiation_error`, `existence_error/2`, …,
+all catchable by shape via `catch/3`), standard order of terms (`compare/3`,
+`@</2`, `@=</2`, `@>/2`, `@>=/2`), `assert`/`retract`, `findall/3`,
+`functor/3`, `=../2`, `arg/3`, `copy_term/2`, `sort/2`/`msort/2`,
+`between/3`, `succ/2`, `atom_codes/2`/`atom_chars/2`/`char_code/2`/
+`number_codes/2`/`number_chars/2`, and a practical-subset parser with a fixed
+infix operator table (no user-defined `op/3`). Per ISO, `"..."` is a proper
+list of character codes, not its own string type — `te_text/1` and friends
+accept either an atom or a code list for text arguments, so `"..."` literals
+still read naturally in scripts. "Codes" are raw bytes (0–255), not Unicode
+codepoints, matching `te`'s raw-UTF-8 buffer. ISO-flavored, not a certified
+conformance suite.
 
 ## Dependencies
 

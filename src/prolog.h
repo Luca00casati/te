@@ -1,8 +1,12 @@
 // A small, from-scratch Prolog engine -- not editor-specific (see script.c
 // for the `te`-facing integration that sits on top of this). Covers facts,
 // rules, unification, backtracking, cut, if-then-else, arithmetic,
-// catch/throw, assert/retract, findall, and a practical-subset parser with
-// infix operators (no user-defined op/3). Not ISO-complete by design.
+// structured ISO error terms (error(Formal, Context)), catch/throw,
+// assert/retract, findall, standard order of terms, and a practical-subset
+// parser with infix operators (no user-defined op/3). "..." is a proper ISO
+// list of character codes (bytes, not Unicode codepoints -- see
+// mkCodeList/getTextFlexible in prolog.c), not a distinct string type.
+// ISO-flavored, not a certified conformance suite.
 #ifndef TE_PROLOG_H
 #define TE_PROLOG_H
 
@@ -69,16 +73,18 @@ bool prologSolve(Prolog *pl, PlTerm *goal);
 bool prologIsNil(Prolog *pl, PlTerm *t);                  // t == the atom '[]'
 bool prologIsList(Prolog *pl, PlTerm *t);                 // t is '.'(Head,Tail)
 bool prologGetListHeadTail(Prolog *pl, PlTerm *t, PlTerm **head, PlTerm **tail);
-int prologArity(Prolog *pl, PlTerm *t);                    // 0 for atom/number/string
+int prologArity(Prolog *pl, PlTerm *t);                    // 0 for atom/number
 const char *prologFunctorName(Prolog *pl, PlTerm *t);      // atom/compound name, else NULL
 PlTerm *prologArg(Prolog *pl, PlTerm *t, int i);            // 1-based
-// Atom or string -> text (used for key/mod names, te_echo/te_insert/te_text).
+// Atom, or a proper ISO list of character codes (0-255) -> text (used for
+// key/mod names, te_echo/te_insert/te_text). A code list is materialized
+// into a fresh query-arena buffer; an atom is returned as-is (no copy).
 bool prologGetText(Prolog *pl, PlTerm *t, const char **out_chars, size_t *out_len);
 bool prologGetInt(Prolog *pl, PlTerm *t, long *out);
 
 // --- Term construction (used by native predicates to build outputs) ------
 PlTerm *prologMkAtom(Prolog *pl, const char *name);
-PlTerm *prologMkString(Prolog *pl, const char *chars, size_t len);
+PlTerm *prologMkCodeList(Prolog *pl, const char *chars, size_t len);
 PlTerm *prologMkInt(Prolog *pl, long v);
 bool prologUnify(Prolog *pl, PlTerm *a, PlTerm *b);
 
