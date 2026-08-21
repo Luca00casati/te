@@ -292,6 +292,19 @@ Two suites, both under `tests/`:
   `handlePrefix` in `main.c` call `scriptHandleKey`/`scriptHandlePrefixKey`
   unconditionally, and `saveFile`/`openPath` call `scriptRunHook` for
   `hook/2` listeners.
+- `src/undo_history.pl` — undo/redo history: what to remember, coalescing a
+  run of typing into one undo step, evicting the oldest entry past
+  `CFG_UNDO_DEPTH`, and what undo/redo actually restore. The byte-level
+  splice (`te_replace_range/3`) stays native; this is the bookkeeping on top,
+  consulted from `scriptSetup` so it's available regardless of `init.pl`.
+- `src/search.pl` — the search/incremental-search/query-replace state
+  machine: which match is selected, next/prev, replace-all's ordering.
+  PCRE2 (regex) and `memmem` (literal) stay native (`te_find_matches/3`,
+  `te_regex_substitute/5`, wrapping `main.c`'s `findMatches`/
+  `editorRegexSubstitute` — shared with the headless `--regex` path so the
+  scanning logic isn't duplicated); this is the decision logic on top. The
+  minibuffer widget itself (typing the query, the modal shell) stays in
+  `main.c`, which resolves "what's the active query" and passes it in.
 - The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
   `src/script.c`, and `src/prolog.c` as C11 and links against SDL2 and
   libpcre2-8 (found via pkg-config; the Prolog engine adds no external
@@ -299,9 +312,10 @@ Two suites, both under `tests/`:
   its own transitive system dependencies resolve automatically at link time,
   unlike raylib's old static archive. It also generates `build/bootstrap_pl.h` from
   `src/bootstrap.pl`, `build/default_bindings_pl.h` from
-  `src/default_bindings.pl`, and `build/undo_history_pl.h` from
-  `src/undo_history.pl` first (via `tools/gen_pl_header.sh`), so
-  `src/prolog.c`/`src/script.c` have something to `#include`.
+  `src/default_bindings.pl`, `build/undo_history_pl.h` from
+  `src/undo_history.pl`, and `build/search_pl.h` from `src/search.pl` first
+  (via `tools/gen_pl_header.sh`), so `src/prolog.c`/`src/script.c` have
+  something to `#include`.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.

@@ -49,9 +49,9 @@ build/platform.o: src/platform.c | build
 build/prolog.o: src/prolog.c build/bootstrap_pl.h | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
 
-# src/script.c #includes the generated build/default_bindings_pl.h and
-# build/undo_history_pl.h.
-build/script.o: src/script.c build/default_bindings_pl.h build/undo_history_pl.h | build
+# src/script.c #includes the generated build/default_bindings_pl.h,
+# build/undo_history_pl.h, and build/search_pl.h.
+build/script.o: src/script.c build/default_bindings_pl.h build/undo_history_pl.h build/search_pl.h | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@
 
 te: build/main.o build/glyphs.o build/platform.o build/script.o build/prolog.o

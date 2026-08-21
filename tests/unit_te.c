@@ -46,10 +46,9 @@ static void reset(void) {
     goal_col_set = false;
     wrap = true;
     view_cols = 80;
-    search_is_regex = false;
-    search_reverse = false;
     search_bad_regex = false;
     match_count = 0;
+    scriptClearSearch();
 }
 
 static void setText(const char *s) {
@@ -306,39 +305,38 @@ static void test_moveLeft_moveRight_utf8(void) {
 }
 
 // --- search & replace --------------------------------------------------
-static void test_computeMatches_literal(void) {
+static void test_findMatches_literal(void) {
     setText("the cat sat on the mat");
-    search_is_regex = false;
-    computeMatches((const unsigned char *)"at", 2);
+    findMatches((const unsigned char *)"at", 2, false);
     CHECK(match_count == 3); // c[at], s[at], m[at]
     CHECK(match_starts[0] == 5);
 }
 
-static void test_computeMatches_regex(void) {
+static void test_findMatches_regex(void) {
     setText("foo1 bar22 baz333");
-    search_is_regex = true;
-    computeMatches((const unsigned char *)"[0-9]+", 6);
+    findMatches((const unsigned char *)"[0-9]+", 6, true);
     CHECK(!search_bad_regex);
     CHECK(match_count == 3);
     CHECK(match_lens[2] == 3); // "333"
 }
 
-static void test_computeMatches_bad_regex(void) {
+static void test_findMatches_bad_regex(void) {
     setText("anything");
-    search_is_regex = true;
-    computeMatches((const unsigned char *)"(unterminated", 14);
+    findMatches((const unsigned char *)"(unterminated", 14, true);
     CHECK(search_bad_regex);
     CHECK(match_count == 0);
 }
 
+// goto_match itself lives in src/search.pl now (reached via
+// scriptSearchUpdate/scriptSearchStep) -- exercise it end to end via the
+// public anchor/cursor state, the same thing the old gotoMatch set.
 static void test_gotoMatch(void) {
     setText("aXaXa");
-    search_is_regex = false;
-    computeMatches((const unsigned char *)"X", 1);
-    CHECK(match_count == 2);
-    gotoMatch(1);
-    CHECK(anchor == match_starts[1]);
-    CHECK(cursor == match_starts[1] + match_lens[1]);
+    scriptStartSearch(false, false, 0);
+    scriptSearchUpdate((const unsigned char *)"X", 1);
+    CHECK(anchor == 1 && cursor == 2); // first X, byte 1
+    scriptSearchStep((const unsigned char *)"X", 1, true);
+    CHECK(anchor == 3 && cursor == 4); // second X, byte 3
 }
 
 static void test_replaceAll_literal(void) {
@@ -493,9 +491,9 @@ int main(void) {
     RUN(test_word_movement);
     RUN(test_moveLeft_moveRight_utf8);
 
-    RUN(test_computeMatches_literal);
-    RUN(test_computeMatches_regex);
-    RUN(test_computeMatches_bad_regex);
+    RUN(test_findMatches_literal);
+    RUN(test_findMatches_regex);
+    RUN(test_findMatches_bad_regex);
     RUN(test_gotoMatch);
     RUN(test_replaceAll_literal);
     RUN(test_replaceAll_regex_backref);

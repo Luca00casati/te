@@ -24,6 +24,8 @@
 #include "default_bindings_pl.h"
 // Same idea, from src/undo_history.pl -- UNDO_HISTORY_PL_SRC/_LEN.
 #include "undo_history_pl.h"
+// Same idea, from src/search.pl -- SEARCH_PL_SRC/_LEN.
+#include "search_pl.h"
 
 static Prolog *pl = NULL;
 
@@ -132,6 +134,10 @@ static bool nTeCursor(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     return prologUnify(p, args[0], prologMkInt(p, (long)editorGetCursor()));
 }
+static bool nTeAnchor(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorGetAnchor()));
+}
 static bool nTeSetCursor(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     long pos;
@@ -154,6 +160,79 @@ static bool nTeUndoDepth(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     return prologUnify(p, args[0], prologMkInt(p, (long)editorUndoDepth()));
 }
+static bool isTrueAtom(Prolog *p, PlTerm *t) {
+    const char *n = prologFunctorName(p, t);
+    return n && strcmp(n, "true") == 0;
+}
+// Builds [match(S0,E0), match(S1,E1), ...] from editorMatchGet(0..count-1),
+// consed from the tail so the result comes out in the same (position) order
+// editorMatchGet already returns them in.
+static PlTerm *mkMatchList(Prolog *p, size_t count) {
+    PlTerm *list = prologMkAtom(p, "[]");
+    for (size_t i = count; i > 0; i--) {
+        size_t start, end;
+        editorMatchGet(i - 1, &start, &end);
+        PlTerm *margs[2] = { prologMkInt(p, (long)start), prologMkInt(p, (long)end) };
+        PlTerm *matchTerm = prologMkCompound(p, "match", 2, margs);
+        PlTerm *cargs[2] = { matchTerm, list };
+        list = prologMkCompound(p, ".", 2, cargs);
+    }
+    return list;
+}
+static bool nTeFindMatches(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *query; size_t qlen;
+    if (!prologGetText(p, args[0], &query, &qlen)) return false;
+    bool isRegex = isTrueAtom(p, args[1]);
+    PlTerm *result;
+    if (!editorFindMatches((const unsigned char *)query, qlen, isRegex)) {
+        result = prologMkAtom(p, "bad_regex");
+    } else {
+        PlTerm *list = mkMatchList(p, editorMatchCount());
+        PlTerm *truncated = prologMkAtom(p, editorMatchTruncated() ? "true" : "false");
+        PlTerm *rargs[2] = { list, truncated };
+        result = prologMkCompound(p, "matches", 2, rargs);
+    }
+    return prologUnify(p, args[2], result);
+}
+static bool nTeRegexSubstitute(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *pattern; size_t plen;
+    if (!prologGetText(p, args[0], &pattern, &plen)) return false;
+    long ms, me;
+    if (!prologGetInt(p, args[1], &ms) || !prologGetInt(p, args[2], &me)) return false;
+    const char *replacement; size_t rlen;
+    if (!prologGetText(p, args[3], &replacement, &rlen)) return false;
+    const unsigned char *out; size_t outlen;
+    PlTerm *result;
+    if (ms < 0 || me < ms ||
+        !editorRegexSubstitute((const unsigned char *)pattern, plen, (size_t)ms, (size_t)me,
+                                (const unsigned char *)replacement, rlen, &out, &outlen)) {
+        result = prologMkAtom(p, "bad_regex");
+    } else {
+        PlTerm *oargs[1] = { prologMkCodeList(p, (const char *)out, outlen) };
+        result = prologMkCompound(p, "ok", 1, oargs);
+    }
+    return prologUnify(p, args[4], result);
+}
+static bool nTeSetSelection(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long a, c;
+    if (!prologGetInt(p, args[0], &a) || !prologGetInt(p, args[1], &c)) return false;
+    if (a < 0 || c < 0) return false;
+    editorSetSelection((size_t)a, (size_t)c);
+    return true;
+}
+static bool nTeApplyReplace(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long start, end;
+    if (!prologGetInt(p, args[0], &start) || !prologGetInt(p, args[1], &end)) return false;
+    if (start < 0 || end < start) return false;
+    const char *bytes; size_t len;
+    if (!prologGetText(p, args[2], &bytes, &len)) return false;
+    editorApplyReplace((size_t)start, (size_t)end, (const unsigned char *)bytes, len);
+    return true;
+}
 
 // --- lifecycle --------------------------------------------------------
 
@@ -165,10 +244,16 @@ static void scriptSetup(void) {
     prologRegisterNative(pl, "te_insert", 1, nTeInsert, NULL);
     prologRegisterNative(pl, "te_text", 1, nTeText, NULL);
     prologRegisterNative(pl, "te_cursor", 1, nTeCursor, NULL);
+    prologRegisterNative(pl, "te_anchor", 1, nTeAnchor, NULL);
     prologRegisterNative(pl, "te_set_cursor", 1, nTeSetCursor, NULL);
     prologRegisterNative(pl, "te_replace_range", 3, nTeReplaceRange, NULL);
     prologRegisterNative(pl, "te_undo_depth", 1, nTeUndoDepth, NULL);
+    prologRegisterNative(pl, "te_find_matches", 3, nTeFindMatches, NULL);
+    prologRegisterNative(pl, "te_regex_substitute", 5, nTeRegexSubstitute, NULL);
+    prologRegisterNative(pl, "te_set_selection", 2, nTeSetSelection, NULL);
+    prologRegisterNative(pl, "te_apply_replace", 3, nTeApplyReplace, NULL);
     prologConsultBuffer(pl, UNDO_HISTORY_PL_SRC, UNDO_HISTORY_PL_SRC_LEN);
+    prologConsultBuffer(pl, SEARCH_PL_SRC, SEARCH_PL_SRC_LEN);
 }
 void scriptInit(void) {
     scriptSetup();
@@ -454,5 +539,145 @@ void scriptClearHistory(void) {
     if (!pl) return;
     size_t mark = prologMark(pl);
     prologSolve(pl, prologMkAtom(pl, "clear_history"));
+    prologReset(pl, mark);
+}
+
+// --- search/replace (src/search.pl) ---------------------------------------
+
+static PlTerm *mkBool(Prolog *p, bool b) { return prologMkAtom(p, b ? "true" : "false"); }
+
+void scriptStartSearch(bool is_regex, bool reverse, size_t origin) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = { mkBool(pl, is_regex), mkBool(pl, reverse), prologMkInt(pl, (long)origin) };
+    prologSolve(pl, prologMkCompound(pl, "start_search", 3, cargs));
+    prologReset(pl, mark);
+}
+void scriptStartReplace(bool is_regex, bool all_mode, size_t origin) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = { mkBool(pl, is_regex), mkBool(pl, all_mode), prologMkInt(pl, (long)origin) };
+    prologSolve(pl, prologMkCompound(pl, "start_replace", 3, cargs));
+    prologReset(pl, mark);
+}
+size_t scriptSearchOrigin(void) {
+    if (!pl) return 0;
+    size_t mark = prologMark(pl);
+    PlTerm *originVar = prologMkVar(pl);
+    PlTerm *cargs[1] = { originVar };
+    size_t origin = 0;
+    if (prologSolve(pl, prologMkCompound(pl, "search_origin", 1, cargs))) {
+        long v;
+        if (prologGetInt(pl, originVar, &v) && v >= 0) origin = (size_t)v;
+    }
+    prologReset(pl, mark);
+    return origin;
+}
+bool scriptSearchReverse(void) {
+    if (!pl) return false;
+    size_t mark = prologMark(pl);
+    PlTerm *revVar = prologMkVar(pl);
+    PlTerm *cargs[1] = { revVar };
+    bool reverse = false;
+    if (prologSolve(pl, prologMkCompound(pl, "search_reverse", 1, cargs))) {
+        const char *fn = prologFunctorName(pl, revVar);
+        reverse = fn && strcmp(fn, "true") == 0;
+    }
+    prologReset(pl, mark);
+    return reverse;
+}
+void scriptSearchUpdate(const unsigned char *query, size_t len) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[1] = { prologMkCodeList(pl, (const char *)query, len) };
+    prologSolve(pl, prologMkCompound(pl, "search_update", 1, cargs));
+    prologReset(pl, mark);
+}
+void scriptSearchStep(const unsigned char *query, size_t len, bool forward) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[2] = { prologMkCodeList(pl, (const char *)query, len), mkBool(pl, forward) };
+    prologSolve(pl, prologMkCompound(pl, "search_step", 2, cargs));
+    prologReset(pl, mark);
+}
+bool scriptEnterReplaceQuery(const unsigned char *pattern, size_t pattern_len,
+                             const unsigned char *replacement, size_t replacement_len,
+                             bool is_regex) {
+    if (!pl) return false;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = {
+        prologMkCodeList(pl, (const char *)pattern, pattern_len),
+        prologMkCodeList(pl, (const char *)replacement, replacement_len),
+        mkBool(pl, is_regex),
+    };
+    bool ok = prologSolve(pl, prologMkCompound(pl, "enter_replace_query", 3, cargs));
+    prologReset(pl, mark);
+    return ok;
+}
+void scriptReplaceStep(bool forward) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[1] = { mkBool(pl, forward) };
+    prologSolve(pl, prologMkCompound(pl, "replace_step", 1, cargs));
+    prologReset(pl, mark);
+}
+ReplaceStepResult scriptReplaceCurrentMatch(void) {
+    if (!pl) return REPLACE_STEP_DONE;
+    size_t mark = prologMark(pl);
+    PlTerm *resultVar = prologMkVar(pl);
+    PlTerm *cargs[1] = { resultVar };
+    ReplaceStepResult result = REPLACE_STEP_DONE;
+    if (prologSolve(pl, prologMkCompound(pl, "replace_current_match", 1, cargs))) {
+        const char *fn = prologFunctorName(pl, resultVar);
+        if (fn && strcmp(fn, "ok") == 0) result = REPLACE_STEP_OK;
+        else if (fn && strcmp(fn, "failed") == 0) result = REPLACE_STEP_FAILED;
+    }
+    prologReset(pl, mark);
+    return result;
+}
+size_t scriptReplaceAll(const unsigned char *pattern, size_t pattern_len,
+                        const unsigned char *replacement, size_t replacement_len,
+                        bool is_regex) {
+    if (!pl) return 0;
+    size_t mark = prologMark(pl);
+    PlTerm *countVar = prologMkVar(pl);
+    PlTerm *cargs[4] = {
+        prologMkCodeList(pl, (const char *)pattern, pattern_len),
+        prologMkCodeList(pl, (const char *)replacement, replacement_len),
+        mkBool(pl, is_regex),
+        countVar,
+    };
+    size_t count = 0;
+    if (prologSolve(pl, prologMkCompound(pl, "replace_all", 4, cargs))) {
+        long v;
+        if (prologGetInt(pl, countVar, &v) && v >= 0) count = (size_t)v;
+    }
+    prologReset(pl, mark);
+    return count;
+}
+void scriptSearchStatus(size_t *index, size_t *count, bool *truncated, bool *bad_regex) {
+    *index = 0; *count = 0; *truncated = false; *bad_regex = false;
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *idxVar = prologMkVar(pl);
+    PlTerm *countVar = prologMkVar(pl);
+    PlTerm *truncVar = prologMkVar(pl);
+    PlTerm *badVar = prologMkVar(pl);
+    PlTerm *cargs[4] = { idxVar, countVar, truncVar, badVar };
+    if (prologSolve(pl, prologMkCompound(pl, "search_status", 4, cargs))) {
+        long v;
+        if (prologGetInt(pl, idxVar, &v) && v >= 0) *index = (size_t)v;
+        if (prologGetInt(pl, countVar, &v) && v >= 0) *count = (size_t)v;
+        const char *tn = prologFunctorName(pl, truncVar);
+        *truncated = tn && strcmp(tn, "true") == 0;
+        const char *bn = prologFunctorName(pl, badVar);
+        *bad_regex = bn && strcmp(bn, "true") == 0;
+    }
+    prologReset(pl, mark);
+}
+void scriptClearSearch(void) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    prologSolve(pl, prologMkAtom(pl, "clear_search"));
     prologReset(pl, mark);
 }

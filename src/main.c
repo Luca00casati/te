@@ -124,17 +124,12 @@ static size_t mb_cursor = 0;
 static char echo_buf[256];
 static size_t echo_len = 0;
 static double echo_time = -100;
+// Minibuffer-adjacent search/replace state that bridges the multi-step
+// prompt flow (mbConfirm) -- the actual search/replace *decision* state
+// (which match is selected, session is_regex/reverse/origin, ...) lives in
+// src/search.pl now (see scriptStartSearch/scriptSearchUpdate/etc.).
 static char last_search[256];
 static size_t last_search_len = 0;
-// Search state: literal vs regex, where the search began (for abort), and the
-// collected matches of the active query.
-static bool search_is_regex = false;
-static bool search_reverse = false; // search backward from the origin
-static size_t search_origin = 0;
-static bool search_bad_regex = false;
-// Search & replace: the pattern is captured in the first prompt, the replacement
-// in the second. `replace_all_mode` distinguishes replace-all from the
-// interactive query-replace (which then loops in the replace_query minibuffer).
 static bool replace_is_regex = false;
 static bool replace_all_mode = false;
 static char replace_from_buf[4096];
@@ -142,12 +137,15 @@ static size_t replace_from_len = 0;
 static char replace_to_buf[4096];
 static size_t replace_to_len = 0;
 static unsigned char one_rep_buf[8192]; // scratch for a single regex substitution
+// Scratch space for findMatches (shared by src/search.pl's te_find_matches
+// native and grep()'s headless --regex path, so the PCRE2/memmem scanning
+// isn't duplicated between the two -- see editorFindMatches/editorMatchGet).
 #define MAX_MATCHES 8192
 static size_t match_starts[MAX_MATCHES];
 static uint32_t match_lens[MAX_MATCHES];
 static size_t match_count = 0;
 static bool match_truncated = false;
-static size_t search_index = 0; // which match is currently selected (for X/N)
+static bool search_bad_regex = false;
 
 // ---------------------------------------------------------------------------
 // Undo / redo: the history itself (src/undo_history.pl) and the raw buffer
@@ -191,10 +189,8 @@ static bool readFileInto(const char *path);
 static void openPath(const char *path);
 static bool saveFile(void);
 static void saveCurrent(void);
-static void computeMatches(const unsigned char *query, size_t query_len);
-static void gotoMatch(size_t idx);
+static bool findMatches(const unsigned char *query, size_t query_len, bool is_regex);
 static void searchUpdate(void);
-static const unsigned char *replacementFor(const unsigned char *matchtext, size_t matchtext_len, size_t *out_len);
 static void replaceAll(const unsigned char *pattern, size_t pattern_len, const unsigned char *replacement, size_t replacement_len, bool is_regex);
 static void enterReplaceQuery(void);
 static void replaceStep(bool forward);
@@ -743,6 +739,7 @@ static bool readFileInto(const char *path) {
 }
 static void openPath(const char *path) {
     freeHistory();
+    scriptClearSearch(); // a stale match set/last-search from another file shouldn't survive
     setFilename(path, strlen(path));
     bool existed = readFileInto(filename);
     cursor = 0;
@@ -774,24 +771,27 @@ static void saveCurrent(void) {
 
 // --- search ----------------------------------------------------------------
 // Collect every match of `query` into match_starts/match_lens. Literal unless
-// search_is_regex, in which case query is a PCRE2 pattern.
-static void computeMatches(const unsigned char *query, size_t query_len) {
+// is_regex, in which case query is a PCRE2 pattern. Shared by editorFindMatches
+// (src/search.pl's te_find_matches/4) and grep()'s headless --regex path, so
+// the PCRE2/memmem scanning logic isn't duplicated between the two. Returns
+// false if the pattern failed to compile (regex only).
+static bool findMatches(const unsigned char *query, size_t query_len, bool is_regex) {
     match_count = 0;
     match_truncated = false;
     search_bad_regex = false;
-    if (query_len == 0) return;
-    if (search_is_regex) {
+    if (query_len == 0) return true;
+    if (is_regex) {
         int errcode = 0;
         PCRE2_SIZE erroff = 0;
         pcre2_code *re = pcre2_compile(query, query_len, 0, &errcode, &erroff, NULL);
         if (!re) {
             search_bad_regex = true;
-            return;
+            return false;
         }
         pcre2_match_data *md = pcre2_match_data_create_from_pattern(re, NULL);
         if (!md) {
             pcre2_code_free(re);
-            return;
+            return true;
         }
         size_t start = 0;
         while (start <= len) {
@@ -826,18 +826,11 @@ static void computeMatches(const unsigned char *query, size_t query_len) {
             from = idx + query_len;
         }
     }
+    return true;
 }
-// Select match `idx`. The count is shown inline in the search prompt (the echo
-// area is hidden while the prompt is open), and echoed for after it closes.
-static void gotoMatch(size_t idx) {
-    search_index = idx;
-    anchor = match_starts[idx];
-    cursor = anchor + match_lens[idx];
-    goal_col_set = false;
-    noteActivity();
-    echoFmt("Match %zu/%zu%s", idx + 1, match_count, match_truncated ? "+" : "");
-}
-// The query currently being searched: the live prompt text, else the last one.
+// The query currently being searched: the live prompt text, else the last
+// one -- minibuffer-adjacent (mb_input/last_search), so this stays here
+// rather than moving into src/search.pl.
 static const unsigned char *activeQueryPtr(size_t *out_len) {
     if (mb_kind == MB_TEXT_PROMPT && mb_intent == MBI_SEARCH && mb_len > 0) {
         *out_len = mb_len;
@@ -846,214 +839,80 @@ static const unsigned char *activeQueryPtr(size_t *out_len) {
     *out_len = last_search_len;
     return (const unsigned char *)last_search;
 }
+// Echoes the live "Match i/N[+]" status (or why there isn't one) from
+// src/search.pl's current state -- shared by every function below that
+// jumps to a match.
+static void echoMatchStatus(void) {
+    size_t index, count; bool truncated, bad_regex;
+    scriptSearchStatus(&index, &count, &truncated, &bad_regex);
+    if (bad_regex) echo("Invalid regex");
+    else if (count == 0) echo("No matches");
+    else echoFmt("Match %zu/%zu%s", index + 1, count, truncated ? "+" : "");
+}
 // Re-run the search after the query changed and jump to the first match at or
 // after where the search began (wrapping). Used for incremental search.
 static void searchUpdate(void) {
-    computeMatches((const unsigned char *)mb_input, mb_len);
-    // No (or invalid) query, or nothing found: don't leave the caret on a stale
-    // partial match -- return to where the search began. The prompt shows why.
-    if (mb_len == 0 || search_bad_regex || match_count == 0) {
-        anchor = search_origin;
-        cursor = search_origin;
-        return;
-    }
-    size_t idx = 0;
-    if (search_reverse) {
-        idx = match_count - 1; // wrap to the last match
-        size_t j = match_count;
-        while (j > 0) {
-            j--;
-            if (match_starts[j] < search_origin) {
-                idx = j;
-                break;
-            }
-        }
-    } else {
-        for (size_t i = 0; i < match_count; i++) {
-            if (match_starts[i] >= search_origin) {
-                idx = i;
-                break;
-            }
-        }
-    }
-    gotoMatch(idx);
+    scriptSearchUpdate((const unsigned char *)mb_input, mb_len);
 }
-// The replacement text for one match. For literal replace it's the replacement
-// string verbatim; for regex it's replace_to applied to the matched text (so
-// $1, $0 etc. expand). Returns NULL on failure.
-static const unsigned char *replacementFor(const unsigned char *matchtext, size_t matchtext_len, size_t *out_len) {
-    if (!replace_is_regex) {
-        *out_len = replace_to_len;
-        return (const unsigned char *)replace_to_buf;
-    }
-    int ec = 0;
-    PCRE2_SIZE eo = 0;
-    pcre2_code *re = pcre2_compile((const unsigned char *)replace_from_buf, replace_from_len, 0, &ec, &eo, NULL);
-    if (!re) return NULL;
-    PCRE2_SIZE outlen = sizeof(one_rep_buf);
-    int rc = pcre2_substitute(re, matchtext, matchtext_len, 0, PCRE2_SUBSTITUTE_OVERFLOW_LENGTH, NULL, NULL,
-                               (const unsigned char *)replace_to_buf, replace_to_len,
-                               one_rep_buf, &outlen);
-    pcre2_code_free(re);
-    if (rc < 0) return NULL;
-    *out_len = outlen;
-    return one_rep_buf;
-}
-// Replace every match of `pattern` with `replacement` in one undo step, via
-// PCRE2 (literal pattern/replacement unless is_regex). Reports the count.
+// Replace every match of `pattern` with `replacement` in one undo step per
+// match, via PCRE2 (literal pattern/replacement unless is_regex).
 static void replaceAll(const unsigned char *pattern, size_t pattern_len, const unsigned char *replacement, size_t replacement_len, bool is_regex) {
     if (pattern_len == 0) return;
-    search_is_regex = is_regex;
-    computeMatches(pattern, pattern_len);
-    if (search_bad_regex) {
-        echo("Invalid pattern");
-        return;
-    }
-    if (match_count == 0) {
-        echo("No matches");
-        return;
-    }
-    size_t count = match_count;
-    size_t saved = cursor;
-    // Apply from the last match to the first so earlier offsets stay valid, and
-    // so each replacement is its own undo step (undo stops at each one, not the
-    // whole batch).
-    size_t i = match_count;
-    while (i > 0) {
-        i--;
-        size_t ms = match_starts[i];
-        size_t me = ms + match_lens[i];
-        const unsigned char *rep;
-        size_t rep_len;
-        if (is_regex) {
-            rep = replacementFor(text + ms, me - ms, &rep_len);
-            if (!rep) continue;
-        } else {
-            rep = replacement;
-            rep_len = replacement_len;
-        }
-        edit(ms, me, rep, rep_len);
-    }
-    cursor = saved < len ? saved : len;
-    anchor = cursor;
-    echoFmt("Replaced %zu", count);
+    size_t count = scriptReplaceAll(pattern, pattern_len, replacement, replacement_len, is_regex);
+    size_t index, mcount; bool truncated, bad_regex;
+    scriptSearchStatus(&index, &mcount, &truncated, &bad_regex);
+    if (bad_regex) echo("Invalid pattern");
+    else if (count == 0) echo("No matches");
+    else echoFmt("Replaced %zu", count);
 }
 // Interactive query-replace: after the pattern and replacement are entered,
 // loop over matches. Enter replaces the current one and advances; n/p
 // navigate; Esc quits. Enters the replace_query minibuffer, or closes it if
 // nothing matches.
 static void enterReplaceQuery(void) {
-    search_is_regex = replace_is_regex;
-    computeMatches((const unsigned char *)replace_from_buf, replace_from_len);
-    if (search_bad_regex) {
-        echo("Invalid pattern");
+    bool ok = scriptEnterReplaceQuery((const unsigned char *)replace_from_buf, replace_from_len,
+                                       (const unsigned char *)replace_to_buf, replace_to_len,
+                                       replace_is_regex);
+    if (!ok) {
+        size_t index, count; bool truncated, bad_regex;
+        scriptSearchStatus(&index, &count, &truncated, &bad_regex);
+        echo(bad_regex ? "Invalid pattern" : "No matches");
         mbClose();
         return;
     }
-    if (match_count == 0) {
-        echo("No matches");
-        mbClose();
-        return;
-    }
-    size_t idx = 0;
-    for (size_t i = 0; i < match_count; i++) {
-        if (match_starts[i] >= search_origin) {
-            idx = i;
-            break;
-        }
-    }
-    gotoMatch(idx);
+    echoMatchStatus();
     mb_kind = MB_REPLACE_QUERY;
 }
 // Move to the next/previous match without replacing (n/p in replace mode).
 static void replaceStep(bool forward) {
-    if (match_count == 0) return;
-    size_t idx = forward ? (search_index + 1) % match_count : (search_index + match_count - 1) % match_count;
-    gotoMatch(idx);
+    scriptReplaceStep(forward);
+    echoMatchStatus();
 }
 // Replace the current match, then advance to the next one (past the insertion
 // so the replacement text is never re-matched). Ends replace mode when none
 // remain.
 static void replaceCurrentMatch(void) {
-    if (match_count == 0) {
-        echo("Replace done");
-        mbClose();
-        return;
+    ReplaceStepResult r = scriptReplaceCurrentMatch();
+    switch (r) {
+        case REPLACE_STEP_OK: echoMatchStatus(); break;
+        case REPLACE_STEP_FAILED: echo("Replace failed"); break;
+        case REPLACE_STEP_DONE: echo("Replace done"); mbClose(); break;
     }
-    size_t ms = match_starts[search_index];
-    size_t me = ms + match_lens[search_index];
-    size_t rep_len;
-    const unsigned char *rep = replacementFor(text + ms, me - ms, &rep_len);
-    if (!rep) {
-        echo("Replace failed");
-        return;
-    }
-    edit(ms, me, rep, rep_len);
-    size_t from = ms + rep_len;
-    computeMatches((const unsigned char *)replace_from_buf, replace_from_len);
-    for (size_t i = 0; i < match_count; i++) {
-        if (match_starts[i] >= from) {
-            gotoMatch(i);
-            return;
-        }
-    }
-    echo("Replace done");
-    mbClose();
 }
 // Jump to the next/previous match of the active query (wrapping).
 static void searchStep(bool forward) {
     size_t qlen;
     const unsigned char *q = activeQueryPtr(&qlen);
-    computeMatches(q, qlen);
-    if (search_bad_regex) {
-        echo("Invalid regex");
-        return;
-    }
-    if (match_count == 0) {
-        echo("No matches");
-        return;
-    }
-    bool have_cur = false;
-    size_t cur = 0;
-    for (size_t i = 0; i < match_count; i++) {
-        if (match_starts[i] == anchor && cursor == match_starts[i] + match_lens[i]) {
-            cur = i;
-            have_cur = true;
-            break;
-        }
-    }
-    size_t idx;
-    if (have_cur) {
-        idx = forward ? (cur + 1) % match_count : (cur + match_count - 1) % match_count;
-    } else if (forward) {
-        idx = 0;
-        for (size_t i = 0; i < match_count; i++) {
-            if (match_starts[i] > cursor) {
-                idx = i;
-                break;
-            }
-        }
-    } else {
-        idx = match_count - 1;
-        size_t j = match_count;
-        while (j > 0) {
-            j--;
-            if (match_starts[j] < cursor) {
-                idx = j;
-                break;
-            }
-        }
-    }
-    gotoMatch(idx);
+    scriptSearchStep(q, qlen, forward);
+    echoMatchStatus();
 }
 // Open a search prompt. If a single-line selection exists, prefill it as the
 // query (search the "word" under the selection) and jump straight to the next
 // (or previous, for reverse) occurrence past it.
 static void startSearch(bool is_regex, bool reverse, const char *prompt) {
-    search_is_regex = is_regex;
-    search_reverse = reverse;
     const unsigned char *prefill = NULL;
     size_t prefill_len = 0;
+    size_t origin;
     if (hasSel()) {
         size_t a = selMin(), b = selMax();
         if (b - a < 256 && memchr(text + a, '\n', b - a) == NULL) {
@@ -1061,9 +920,10 @@ static void startSearch(bool is_regex, bool reverse, const char *prompt) {
             prefill_len = b - a;
             // Look past the current selection: before it when reversing, after
             // it otherwise, so we land on the *next* match, not this one.
-            search_origin = reverse ? a : b;
-        } else search_origin = cursor;
-    } else search_origin = cursor;
+            origin = reverse ? a : b;
+        } else origin = cursor;
+    } else origin = cursor;
+    scriptStartSearch(is_regex, reverse, origin);
     mbStartPrompt(MBI_SEARCH, prompt, prefill, prefill_len);
     if (prefill_len > 0) searchUpdate();
 }
@@ -1073,9 +933,7 @@ static void startSearch(bool is_regex, bool reverse, const char *prompt) {
 static void startReplace(bool is_regex, bool all_mode) {
     replace_is_regex = is_regex;
     replace_all_mode = all_mode;
-    search_is_regex = is_regex; // drives the incremental highlight
-    search_reverse = false;
-    search_origin = cursor;
+    scriptStartReplace(is_regex, all_mode, cursor); // is_regex also drives the incremental highlight
     const char *label = all_mode
                              ? (is_regex ? "Replace all (regex): " : "Replace all: ")
                              : (is_regex ? "Replace (regex): " : "Replace: ");
@@ -1175,7 +1033,7 @@ static void mbConfirm(void) {
                 last_search_len = n;
                 // Incremental search already sits on a match; keep it.
             } else if (last_search_len > 0) {
-                searchStep(!search_reverse); // empty input repeats the search
+                searchStep(!scriptSearchReverse()); // empty input repeats the search
             }
             break;
         case MBI_REPLACE_FROM: {
@@ -1258,8 +1116,9 @@ static void handleMinibuffer(bool ctrl) {
     bool is_search = mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM;
     if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
         if (is_search) { // abort returns to where the search began
-            anchor = search_origin;
-            cursor = search_origin;
+            size_t origin = scriptSearchOrigin();
+            anchor = origin;
+            cursor = origin;
         }
         echo("Aborted");
         mbClose();
@@ -1543,8 +1402,7 @@ static int grep(const char *pattern, const char *input, const char *output) {
         errWrite("te: cannot read stdin\n");
         return 2;
     }
-    search_is_regex = true;
-    computeMatches((const unsigned char *)pattern, strlen(pattern));
+    findMatches((const unsigned char *)pattern, strlen(pattern), /*is_regex=*/true);
     if (search_bad_regex) {
         errWrite("te: invalid regex\n");
         return 2;
@@ -1813,8 +1671,10 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
         return;
     }
     if (mb_kind == MB_REPLACE_QUERY) {
+        size_t index, count; bool truncated, bad_regex;
+        scriptSearchStatus(&index, &count, &truncated, &bad_regex);
         char buf[128];
-        int n = snprintf(buf, sizeof(buf), "Replace? Enter=yes  n/p=skip  Esc=done  (%zu/%zu)", search_index + 1, match_count);
+        int n = snprintf(buf, sizeof(buf), "Replace? Enter=yes  n/p=skip  Esc=done  (%zu/%zu)", index + 1, count);
         drawStr(n > 0 ? buf : "Replace?", char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
         return;
     }
@@ -1832,10 +1692,12 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
         platformDrawRect(cx, y + 2, 2, CFG_FONT_SIZE, CFG_COLOR_CURSOR);
         // search / replace-pattern prompt: show the live match count after query
         if ((mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM) && mb_len > 0) {
+            size_t index, count; bool truncated, bad_regex;
+            scriptSearchStatus(&index, &count, &truncated, &bad_regex);
             char st[64];
-            if (search_bad_regex) snprintf(st, sizeof(st), "(bad regex)");
-            else if (match_count == 0) snprintf(st, sizeof(st), "(no match)");
-            else snprintf(st, sizeof(st), "(%zu/%zu%s)", search_index + 1, match_count, match_truncated ? "+" : "");
+            if (bad_regex) snprintf(st, sizeof(st), "(bad regex)");
+            else if (count == 0) snprintf(st, sizeof(st), "(no match)");
+            else snprintf(st, sizeof(st), "(%zu/%zu%s)", index + 1, count, truncated ? "+" : "");
             float sx = x0 + (float)mb_len * char_w + 2 * char_w;
             drawStr(st, char_w, sx, y + 2, CFG_COLOR_GUTTER);
         }
@@ -2085,6 +1947,45 @@ void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, si
     replaceRange(start, end, bytes, bytes_len);
 }
 size_t editorUndoDepth(void) { return CFG_UNDO_DEPTH; }
+size_t editorGetAnchor(void) { return anchor; }
+void editorSetSelection(size_t anchor_pos, size_t cursor_pos) {
+    if (anchor_pos > len) anchor_pos = len;
+    if (cursor_pos > len) cursor_pos = len;
+    anchor = anchor_pos;
+    cursor = cursor_pos;
+    goal_col_set = false;
+    noteActivity();
+}
+void editorApplyReplace(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
+    edit(start, end, bytes, bytes_len);
+}
+bool editorFindMatches(const unsigned char *query, size_t query_len, bool is_regex) {
+    return findMatches(query, query_len, is_regex);
+}
+size_t editorMatchCount(void) { return match_count; }
+bool editorMatchTruncated(void) { return match_truncated; }
+void editorMatchGet(size_t i, size_t *start, size_t *end) {
+    *start = match_starts[i];
+    *end = match_starts[i] + match_lens[i];
+}
+bool editorRegexSubstitute(const unsigned char *pattern, size_t pattern_len,
+                           size_t match_start, size_t match_end,
+                           const unsigned char *replacement, size_t replacement_len,
+                           const unsigned char **out, size_t *out_len) {
+    int ec = 0;
+    PCRE2_SIZE eo = 0;
+    pcre2_code *re = pcre2_compile(pattern, pattern_len, 0, &ec, &eo, NULL);
+    if (!re) return false;
+    PCRE2_SIZE outlen = sizeof(one_rep_buf);
+    int rc = pcre2_substitute(re, text + match_start, match_end - match_start, 0,
+                               PCRE2_SUBSTITUTE_OVERFLOW_LENGTH, NULL, NULL,
+                               replacement, replacement_len, one_rep_buf, &outlen);
+    pcre2_code_free(re);
+    if (rc < 0) return false;
+    *out = one_rep_buf;
+    *out_len = outlen;
+    return true;
+}
 
 int main(int argc, char **argv) {
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits

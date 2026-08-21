@@ -102,4 +102,66 @@ bool scriptUndoStackEmpty(void);
 // buffer on disk is the new baseline, so old undo/redo steps no longer apply).
 void scriptClearHistory(void);
 
+// --- search/replace (src/search.pl) ---------------------------------------
+// PCRE2/memmem stay native (te_find_matches/3, te_regex_substitute/5 in
+// script.c, wrapping main.c's findMatches/editorRegexSubstitute); this is
+// the decision logic on top -- which match is selected, next/prev/replace,
+// wrap-around, replace-all's ordering. main.c still owns the minibuffer
+// widget itself (typing the query, Tab-complete, the modal shell) and
+// resolving "what's the active query" (live prompt text vs. the last
+// committed search), passing the resolved bytes in here as an argument.
+
+void scriptStartSearch(bool is_regex, bool reverse, size_t origin);
+void scriptStartReplace(bool is_regex, bool all_mode, size_t origin);
+// Where the current session began -- main.c reads this back to restore the
+// caret when a search/replace-pattern prompt is aborted (Esc).
+size_t scriptSearchOrigin(void);
+// Whether the current session searches backward -- main.c reads this back
+// for empty-Enter repeat-search (which reverses direction each time).
+bool scriptSearchReverse(void);
+// Re-runs the search for `query` and jumps to the first match at/after (or,
+// reversed, before) the session's origin, wrapping -- or back to the origin
+// itself if the query is empty/invalid/matchless. Never fails.
+void scriptSearchUpdate(const unsigned char *query, size_t len);
+// Jumps to the next/previous match of `query` (wrapping). `query` is
+// whatever main.c's activeQueryPtr()-equivalent resolved to: the live
+// prompt text, or the last committed search if the prompt is empty.
+void scriptSearchStep(const unsigned char *query, size_t len, bool forward);
+
+// Enters the query-replace loop: records pattern/replacement/is_regex and
+// jumps to the first match at/after the origin scriptStartReplace recorded
+// (no wraparound). Returns false on a bad pattern or zero matches --
+// scriptSearchStatus's bad_regex flag tells the caller which message to
+// echo; either way the caller closes the minibuffer itself (no loop was
+// entered on failure).
+bool scriptEnterReplaceQuery(const unsigned char *pattern, size_t pattern_len,
+                             const unsigned char *replacement, size_t replacement_len,
+                             bool is_regex);
+// n/p in the query-replace loop: step without replacing.
+void scriptReplaceStep(bool forward);
+
+typedef enum { REPLACE_STEP_OK, REPLACE_STEP_DONE, REPLACE_STEP_FAILED } ReplaceStepResult;
+// Applies the current match, then advances to the next remaining one (past
+// the insertion, so the replacement text is never re-matched). OK: applied
+// and another match is now selected (read scriptSearchStatus for "Match
+// i/N"). DONE: nothing left -- caller echoes "Replace done" and closes the
+// loop. FAILED: substitution failed for this match -- caller echoes
+// "Replace failed" and leaves the loop open (matches the old asymmetry).
+ReplaceStepResult scriptReplaceCurrentMatch(void);
+// Replaces every match of `pattern` with `replacement`, one native call per
+// match (each gets its own undo step, same as ordinary typing). Returns the
+// match count (0 if bad regex or no matches -- scriptSearchStatus's
+// bad_regex flag disambiguates which). Caller should skip this call
+// entirely for an empty pattern (silent no-op, matching the old code).
+size_t scriptReplaceAll(const unsigned char *pattern, size_t pattern_len,
+                        const unsigned char *replacement, size_t replacement_len,
+                        bool is_regex);
+
+// Read-back for the minibuffer draw code / echo messages -- re-queried
+// fresh each call, same as scriptTopBindingCount and friends.
+void scriptSearchStatus(size_t *index, size_t *count, bool *truncated, bool *bad_regex);
+// Resets match/search/replace state to empty -- called when a new file is
+// opened, alongside the existing scriptClearHistory() call.
+void scriptClearSearch(void);
+
 #endif // TE_SCRIPT_H
