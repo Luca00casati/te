@@ -305,6 +305,16 @@ Two suites, both under `tests/`:
   scanning logic isn't duplicated); this is the decision logic on top. The
   minibuffer widget itself (typing the query, the modal shell) stays in
   `main.c`, which resolves "what's the active query" and passes it in.
+- `src/movement.pl` — cursor movement: left/right/word/home/end/buffer-
+  start/end, select-all, and goal-column-tracking wrap-aware up/down/
+  page-up/down. The raw UTF-8/line/column math stays native (`te_step_left/2`,
+  `te_word_start_left/2`, `te_line_start/2`, `te_cols_in/3`,
+  `te_byte_at_col/4`, `te_vis_rows/3`, ... — all thin wrappers around the same
+  `lineStart`/`colsIn`/`byteAtCol`/`visRows` functions `main.c`'s rendering
+  and scrolling call directly every frame); this is the decision logic on
+  top — which direction, how far, and the sticky goal column a run of
+  up/down presses tries to keep (`goal_col_set`/`goal_col_val` facts, replacing
+  the old C statics of the same name).
 - The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
   `src/script.c`, and `src/prolog.c` as C11 and links against SDL2 and
   libpcre2-8 (found via pkg-config; the Prolog engine adds no external
@@ -313,9 +323,10 @@ Two suites, both under `tests/`:
   unlike raylib's old static archive. It also generates `build/bootstrap_pl.h` from
   `src/bootstrap.pl`, `build/default_bindings_pl.h` from
   `src/default_bindings.pl`, `build/undo_history_pl.h` from
-  `src/undo_history.pl`, and `build/search_pl.h` from `src/search.pl` first
-  (via `tools/gen_pl_header.sh`), so `src/prolog.c`/`src/script.c` have
-  something to `#include`.
+  `src/undo_history.pl`, `build/search_pl.h` from `src/search.pl`, and
+  `build/movement_pl.h` from `src/movement.pl` first (via
+  `tools/gen_pl_header.sh`), so `src/prolog.c`/`src/script.c` have something
+  to `#include`.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.

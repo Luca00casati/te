@@ -43,12 +43,12 @@ static void reset(void) {
     anchor = 0;
     dirty = false;
     mark_active = false;
-    goal_col_set = false;
     wrap = true;
     view_cols = 80;
     search_bad_regex = false;
     match_count = 0;
     scriptClearSearch();
+    scriptClearGoalColumn();
 }
 
 static void setText(const char *s) {
@@ -267,26 +267,32 @@ static void test_swapLine_down_and_up(void) {
     CHECK(textEquals("one\ntwo\nthree"));
 }
 
-// --- word movement ---------------------------------------------------------
+// --- word movement -----------------------------------------------------
+// moveWordStartRight/moveWordEndRight/moveWordStartLeft's logic moved into
+// src/movement.pl (move_word_start_right/move_word_end_right/
+// move_word_start_left) -- exercise it through the public runAction entry
+// point, same as production code does.
 static void test_word_movement(void) {
     setText("foo bar_baz  qux");
     cursor = 0;
-    moveWordStartRight();
+    runAction(ACTION_MOVE_WORD_START_RIGHT);
     CHECK(cursor == 4); // start of "bar_baz" ('_' is a word char)
-    moveWordStartRight();
+    runAction(ACTION_MOVE_WORD_START_RIGHT);
     CHECK(cursor == 13); // start of "qux", past the double space
 
     setText("foo bar");
     cursor = 0;
-    moveWordEndRight();
+    runAction(ACTION_MOVE_WORD_END_RIGHT);
     CHECK(cursor == 3); // end of "foo"
 
     setText("foo bar");
     cursor = 7; // end of buffer
-    moveWordStartLeft();
+    runAction(ACTION_MOVE_WORD_START_LEFT);
     CHECK(cursor == 4); // start of "bar"
 }
 
+// moveLeft/moveRight's logic moved into src/movement.pl (move_left/
+// move_right) -- exercise it through runAction, same as above.
 static void test_moveLeft_moveRight_utf8(void) {
     unsigned char enc[4];
     size_t n = utf8Encode(0xE9, enc); // U+00E9, 2 bytes
@@ -296,11 +302,11 @@ static void test_moveLeft_moveRight_utf8(void) {
     text[1 + n] = 'b';
     len = 2 + n;
     cursor = 0;
-    moveRight(); // over 'a'
+    runAction(ACTION_MOVE_RIGHT); // over 'a'
     CHECK(cursor == 1);
-    moveRight(); // over the whole 2-byte codepoint, not just one byte
+    runAction(ACTION_MOVE_RIGHT); // over the whole 2-byte codepoint, not just one byte
     CHECK(cursor == 1 + n);
-    moveLeft(); // back over the codepoint
+    runAction(ACTION_MOVE_LEFT); // back over the codepoint
     CHECK(cursor == 1);
 }
 

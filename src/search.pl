@@ -68,11 +68,16 @@ recompute(Query, IsRegex) :-
     ).
 
 % Selects match_list's Index-th entry and records it as the current one.
+% Also clears the goal column (src/movement.pl) -- jumping to a match
+% shouldn't leave a stale up/down goal column from before the jump, the
+% same thing te_set_selection's caller (this predicate) always did back
+% when goal-column state was a C static te_set_selection reset directly.
 goto_match(Index) :-
     match_list(List),
     nth0(Index, List, match(Start, End)),
     te_set_selection(Start, End),
-    set_search_index(Index).
+    set_search_index(Index),
+    clear_goal_col.
 
 % --- index-picking helpers, shared by search_update/search_step/
 % enter_replace_query/replace_current_match ---------------------------------

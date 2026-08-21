@@ -26,6 +26,8 @@
 #include "undo_history_pl.h"
 // Same idea, from src/search.pl -- SEARCH_PL_SRC/_LEN.
 #include "search_pl.h"
+// Same idea, from src/movement.pl -- MOVEMENT_PL_SRC/_LEN.
+#include "movement_pl.h"
 
 static Prolog *pl = NULL;
 
@@ -234,6 +236,87 @@ static bool nTeApplyReplace(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return true;
 }
 
+// --- movement (src/movement.pl) -------------------------------------------
+
+static bool getPos(Prolog *p, PlTerm *t, size_t *out) {
+    long v;
+    if (!prologGetInt(p, t, &v) || v < 0) return false;
+    *out = (size_t)v;
+    return true;
+}
+static bool nTeLineStart(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorLineStart(pos)));
+}
+static bool nTeLineEnd(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorLineEnd(pos)));
+}
+static bool nTeColsIn(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t start, end;
+    if (!getPos(p, args[0], &start) || !getPos(p, args[1], &end) || end < start) return false;
+    return prologUnify(p, args[2], prologMkInt(p, (long)editorColsIn(start, end)));
+}
+static bool nTeByteAtCol(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t start, stop, col;
+    if (!getPos(p, args[0], &start) || !getPos(p, args[1], &stop) || !getPos(p, args[2], &col) || stop < start) return false;
+    return prologUnify(p, args[3], prologMkInt(p, (long)editorByteAtCol(start, stop, col)));
+}
+static bool nTeVisRows(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t lineCols, cols;
+    if (!getPos(p, args[0], &lineCols) || !getPos(p, args[1], &cols) || cols == 0) return false;
+    return prologUnify(p, args[2], prologMkInt(p, (long)editorVisRows(lineCols, cols)));
+}
+static bool nTeStepLeft(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorStepLeft(pos)));
+}
+static bool nTeStepRight(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorStepRight(pos)));
+}
+static bool nTeWordStartLeft(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorWordStartLeft(pos)));
+}
+static bool nTeWordStartRight(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorWordStartRight(pos)));
+}
+static bool nTeWordEndRight(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorWordEndRight(pos)));
+}
+static bool nTeViewCols(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorViewCols()));
+}
+static bool nTePageLines(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorPageLines()));
+}
+static bool nTeBufferLen(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorBufferLen()));
+}
+
 // --- lifecycle --------------------------------------------------------
 
 static void scriptSetup(void) {
@@ -252,8 +335,22 @@ static void scriptSetup(void) {
     prologRegisterNative(pl, "te_regex_substitute", 5, nTeRegexSubstitute, NULL);
     prologRegisterNative(pl, "te_set_selection", 2, nTeSetSelection, NULL);
     prologRegisterNative(pl, "te_apply_replace", 3, nTeApplyReplace, NULL);
+    prologRegisterNative(pl, "te_line_start", 2, nTeLineStart, NULL);
+    prologRegisterNative(pl, "te_line_end", 2, nTeLineEnd, NULL);
+    prologRegisterNative(pl, "te_cols_in", 3, nTeColsIn, NULL);
+    prologRegisterNative(pl, "te_byte_at_col", 4, nTeByteAtCol, NULL);
+    prologRegisterNative(pl, "te_vis_rows", 3, nTeVisRows, NULL);
+    prologRegisterNative(pl, "te_step_left", 2, nTeStepLeft, NULL);
+    prologRegisterNative(pl, "te_step_right", 2, nTeStepRight, NULL);
+    prologRegisterNative(pl, "te_word_start_left", 2, nTeWordStartLeft, NULL);
+    prologRegisterNative(pl, "te_word_start_right", 2, nTeWordStartRight, NULL);
+    prologRegisterNative(pl, "te_word_end_right", 2, nTeWordEndRight, NULL);
+    prologRegisterNative(pl, "te_view_cols", 1, nTeViewCols, NULL);
+    prologRegisterNative(pl, "te_page_lines", 1, nTePageLines, NULL);
+    prologRegisterNative(pl, "te_buffer_len", 1, nTeBufferLen, NULL);
     prologConsultBuffer(pl, UNDO_HISTORY_PL_SRC, UNDO_HISTORY_PL_SRC_LEN);
     prologConsultBuffer(pl, SEARCH_PL_SRC, SEARCH_PL_SRC_LEN);
+    prologConsultBuffer(pl, MOVEMENT_PL_SRC, MOVEMENT_PL_SRC_LEN);
 }
 void scriptInit(void) {
     scriptSetup();
@@ -679,5 +776,46 @@ void scriptClearSearch(void) {
     if (!pl) return;
     size_t mark = prologMark(pl);
     prologSolve(pl, prologMkAtom(pl, "clear_search"));
+    prologReset(pl, mark);
+}
+
+// --- cursor movement (src/movement.pl) ------------------------------------
+
+static void solveAtom(const char *name) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    prologSolve(pl, prologMkAtom(pl, name));
+    prologReset(pl, mark);
+}
+void scriptClearGoalColumn(void) { solveAtom("clear_goal_col"); }
+void scriptMoveLeft(void) { solveAtom("move_left"); }
+void scriptMoveRight(void) { solveAtom("move_right"); }
+void scriptMoveWordStartLeft(void) { solveAtom("move_word_start_left"); }
+void scriptMoveWordStartRight(void) { solveAtom("move_word_start_right"); }
+void scriptMoveWordEndRight(void) { solveAtom("move_word_end_right"); }
+void scriptMoveHome(void) { solveAtom("move_home"); }
+void scriptMoveEnd(void) { solveAtom("move_end"); }
+void scriptMoveBufferStart(void) { solveAtom("move_buffer_start"); }
+void scriptMoveBufferEnd(void) { solveAtom("move_buffer_end"); }
+void scriptSelectAll(void) { solveAtom("select_all"); }
+void scriptMoveVertical(int delta, bool wrap, size_t cols) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = { prologMkInt(pl, (long)delta), mkBool(pl, wrap), prologMkInt(pl, (long)cols) };
+    prologSolve(pl, prologMkCompound(pl, "move_vertical", 3, cargs));
+    prologReset(pl, mark);
+}
+void scriptPageUp(bool wrap, size_t cols, size_t lines) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = { mkBool(pl, wrap), prologMkInt(pl, (long)cols), prologMkInt(pl, (long)lines) };
+    prologSolve(pl, prologMkCompound(pl, "page_up", 3, cargs));
+    prologReset(pl, mark);
+}
+void scriptPageDown(bool wrap, size_t cols, size_t lines) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[3] = { mkBool(pl, wrap), prologMkInt(pl, (long)cols), prologMkInt(pl, (long)lines) };
+    prologSolve(pl, prologMkCompound(pl, "page_down", 3, cargs));
     prologReset(pl, mark);
 }

@@ -164,4 +164,31 @@ void scriptSearchStatus(size_t *index, size_t *count, bool *truncated, bool *bad
 // opened, alongside the existing scriptClearHistory() call.
 void scriptClearSearch(void);
 
+// --- cursor movement (src/movement.pl) ------------------------------------
+// The raw UTF-8/line/column math stays native (see src/movement.pl's header
+// comment); this is the decision logic on top -- which direction, how far,
+// and the goal-column bookkeeping a run of up/down presses needs. main.c's
+// applyAction calls these instead of the old static moveLeft/moveVertical/
+// etc., keeping its switch statement's shape unchanged.
+
+// Clears the goal column -- called by every non-vertical action (typing,
+// deleting, jumping...) so a later up/down recomputes it from the new
+// position rather than keeping a stale one.
+void scriptClearGoalColumn(void);
+void scriptMoveLeft(void);
+void scriptMoveRight(void);
+void scriptMoveWordStartLeft(void);
+void scriptMoveWordStartRight(void);
+void scriptMoveWordEndRight(void);
+void scriptMoveHome(void);
+void scriptMoveEnd(void);
+void scriptMoveBufferStart(void);
+void scriptMoveBufferEnd(void);
+void scriptSelectAll(void);
+// delta: -1 (up) or 1 (down). wrap/cols are main.c's `wrap` config and
+// current view_cols -- Prolog doesn't track viewport state itself.
+void scriptMoveVertical(int delta, bool wrap, size_t cols);
+void scriptPageUp(bool wrap, size_t cols, size_t lines);
+void scriptPageDown(bool wrap, size_t cols, size_t lines);
+
 #endif // TE_SCRIPT_H

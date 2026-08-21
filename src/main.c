@@ -65,11 +65,9 @@ static bool wrap = true;
 static size_t page_lines = 1;
 // Visible text columns, refreshed each frame; used for wrap-aware vertical moves.
 static size_t view_cols = 1;
-// Sticky/goal column for vertical movement: the on-screen column a run of
-// up/down moves tries to keep. goal_col_set == false means "not set"; any
-// horizontal motion clears it.
-static bool goal_col_set = false;
-static size_t goal_col_val = 0;
+// Sticky/goal column for vertical movement now lives in src/movement.pl
+// (goal_col_set/1, goal_col_val/1) -- a run of up/down moves tries to keep
+// the same on-screen column; any other action clears it (scriptClearGoalColumn).
 static bool shift = false;
 // True only while a plain (Shift+navigation) move is extending the selection;
 // false for chorded moves like Ctrl+Shift+L, which should just move.
@@ -167,8 +165,6 @@ static void doRedo(void);
 static void freeHistory(void);
 static size_t lineStart(size_t pos);
 static size_t lineEnd(size_t pos);
-static void moveVisual(int delta);
-static void moveVertical(int delta);
 static size_t lineCount(void);
 static size_t lineStartOfRow(size_t row);
 static LineCol cursorLineCol(void);
@@ -325,16 +321,20 @@ static void doRedo(void) {
 }
 static void freeHistory(void) { scriptClearHistory(); }
 
-// --- cursor movement (pure caret; selection handled by caller) -------------
-static void moveLeft(void) {
-    if (cursor == 0) return;
-    cursor--;
-    while (cursor > 0 && isCont(text[cursor])) cursor--;
+// --- cursor movement primitives (pure: position in, position out; the
+// decision of what to do with the result -- collapse/extend selection,
+// goal-column bookkeeping -- lives in src/movement.pl now) ------------------
+static size_t stepLeft(size_t pos) {
+    if (pos == 0) return pos;
+    pos--;
+    while (pos > 0 && isCont(text[pos])) pos--;
+    return pos;
 }
-static void moveRight(void) {
-    if (cursor >= len) return;
-    cursor++;
-    while (cursor < len && isCont(text[cursor])) cursor++;
+static size_t stepRight(size_t pos) {
+    if (pos >= len) return pos;
+    pos++;
+    while (pos < len && isCont(text[pos])) pos++;
+    return pos;
 }
 // Word constituent: ASCII alnum/underscore, or any non-ASCII byte (so
 // multi-byte letters count as part of a word).
@@ -344,20 +344,23 @@ static bool isWordChar(unsigned char b) {
 }
 // Start of the next word: finish the current word, then skip separators so
 // the cursor lands on the first constituent of the following word.
-static void moveWordStartRight(void) {
-    while (cursor < len && isWordChar(text[cursor])) cursor++;
-    while (cursor < len && !isWordChar(text[cursor])) cursor++;
+static size_t wordStartRight(size_t pos) {
+    while (pos < len && isWordChar(text[pos])) pos++;
+    while (pos < len && !isWordChar(text[pos])) pos++;
+    return pos;
 }
 // End of the next word: skip separators, then skip the word so the cursor
 // lands just past its last constituent.
-static void moveWordEndRight(void) {
-    while (cursor < len && !isWordChar(text[cursor])) cursor++;
-    while (cursor < len && isWordChar(text[cursor])) cursor++;
+static size_t wordEndRight(size_t pos) {
+    while (pos < len && !isWordChar(text[pos])) pos++;
+    while (pos < len && isWordChar(text[pos])) pos++;
+    return pos;
 }
 // Start of the previous word.
-static void moveWordStartLeft(void) {
-    while (cursor > 0 && !isWordChar(text[cursor - 1])) cursor--;
-    while (cursor > 0 && isWordChar(text[cursor - 1])) cursor--;
+static size_t wordStartLeft(size_t pos) {
+    while (pos > 0 && !isWordChar(text[pos - 1])) pos--;
+    while (pos > 0 && isWordChar(text[pos - 1])) pos--;
+    return pos;
 }
 static size_t lineStart(size_t pos) {
     size_t i = pos;
@@ -368,64 +371,6 @@ static size_t lineEnd(size_t pos) {
     size_t i = pos;
     while (i < len && text[i] != '\n') i++;
     return i;
-}
-static void moveHome(void) { cursor = lineStart(cursor); }
-static void moveEnd(void) { cursor = lineEnd(cursor); }
-static void moveVertical(int delta) {
-    if (wrap) {
-        moveVisual(delta);
-        return;
-    }
-    size_t ls = lineStart(cursor);
-    size_t col = goal_col_set ? goal_col_val : colsIn(ls, cursor);
-    goal_col_set = true;
-    goal_col_val = col;
-    if (delta < 0) {
-        if (ls == 0) return;
-        size_t prev_start = lineStart(ls - 1);
-        cursor = byteAtCol(prev_start, ls - 1, col);
-    } else {
-        size_t le = lineEnd(cursor);
-        if (le >= len) return;
-        size_t next_start = le + 1;
-        cursor = byteAtCol(next_start, lineEnd(next_start), col);
-    }
-}
-// Move one visual (wrapped) row, keeping the same on-screen column. Within a
-// long logical line this steps between its segments; at a segment edge it
-// crosses to the adjacent logical line's nearest row.
-static void moveVisual(int delta) {
-    size_t cols = view_cols > 1 ? view_cols : 1;
-    size_t ls = lineStart(cursor);
-    size_t le = lineEnd(cursor);
-    size_t col = colsIn(ls, cursor); // display column within this logical line
-    size_t sub = col / cols;         // which visual row within this logical line
-    if (!goal_col_set) {
-        goal_col_set = true;
-        goal_col_val = col % cols;
-    }
-    size_t vcol = goal_col_val < cols - 1 ? goal_col_val : cols - 1; // on-screen column to preserve
-    if (delta < 0) {
-        if (sub > 0) {
-            cursor = byteAtCol(ls, le, (sub - 1) * cols + vcol);
-        } else {
-            if (ls == 0) return;
-            size_t prev_start = lineStart(ls - 1);
-            size_t prev_cols = colsIn(prev_start, ls - 1);
-            size_t last_sub = visRows(prev_cols, cols) - 1;
-            cursor = byteAtCol(prev_start, ls - 1, last_sub * cols + vcol);
-        }
-    } else {
-        size_t llen = colsIn(ls, le);
-        size_t last_sub = visRows(llen, cols) - 1;
-        if (sub < last_sub) {
-            cursor = byteAtCol(ls, le, (sub + 1) * cols + vcol);
-        } else {
-            if (le >= len) return;
-            size_t next_start = le + 1;
-            cursor = byteAtCol(next_start, lineEnd(next_start), vcol);
-        }
-    }
 }
 static size_t lineCount(void) {
     size_t c = 1;
@@ -1197,7 +1142,7 @@ static void applyAction(Action action) {
         case ACTION_PAGE_DOWN:
             break;
         default:
-            goal_col_set = false;
+            scriptClearGoalColumn();
             break;
     }
     // Echo the committed action to the minibuffer. Actions that set their own
@@ -1224,28 +1169,21 @@ static void applyAction(Action action) {
             break;
         case ACTION_DELETE_BACK: deleteBack(); break;
         case ACTION_DELETE_FORWARD: deleteForward(); break;
-        case ACTION_MOVE_LEFT: moveLeft(); afterMove(); break;
-        case ACTION_MOVE_RIGHT: moveRight(); afterMove(); break;
-        case ACTION_MOVE_UP: moveVertical(-1); afterMove(); break;
-        case ACTION_MOVE_DOWN: moveVertical(1); afterMove(); break;
-        case ACTION_MOVE_HOME: moveHome(); afterMove(); break;
-        case ACTION_MOVE_END: moveEnd(); afterMove(); break;
-        case ACTION_MOVE_BUFFER_START: cursor = 0; afterMove(); break;
-        case ACTION_MOVE_BUFFER_END: cursor = len; afterMove(); break;
-        case ACTION_MOVE_WORD_START_LEFT: moveWordStartLeft(); afterMove(); break;
-        case ACTION_MOVE_WORD_START_RIGHT: moveWordStartRight(); afterMove(); break;
-        case ACTION_MOVE_WORD_END_RIGHT: moveWordEndRight(); afterMove(); break;
-        case ACTION_PAGE_UP:
-            for (size_t i = 0; i < page_lines; i++) moveVertical(-1);
-            afterMove();
-            break;
-        case ACTION_PAGE_DOWN:
-            for (size_t i = 0; i < page_lines; i++) moveVertical(1);
-            afterMove();
-            break;
+        case ACTION_MOVE_LEFT: scriptMoveLeft(); afterMove(); break;
+        case ACTION_MOVE_RIGHT: scriptMoveRight(); afterMove(); break;
+        case ACTION_MOVE_UP: scriptMoveVertical(-1, wrap, view_cols); afterMove(); break;
+        case ACTION_MOVE_DOWN: scriptMoveVertical(1, wrap, view_cols); afterMove(); break;
+        case ACTION_MOVE_HOME: scriptMoveHome(); afterMove(); break;
+        case ACTION_MOVE_END: scriptMoveEnd(); afterMove(); break;
+        case ACTION_MOVE_BUFFER_START: scriptMoveBufferStart(); afterMove(); break;
+        case ACTION_MOVE_BUFFER_END: scriptMoveBufferEnd(); afterMove(); break;
+        case ACTION_MOVE_WORD_START_LEFT: scriptMoveWordStartLeft(); afterMove(); break;
+        case ACTION_MOVE_WORD_START_RIGHT: scriptMoveWordStartRight(); afterMove(); break;
+        case ACTION_MOVE_WORD_END_RIGHT: scriptMoveWordEndRight(); afterMove(); break;
+        case ACTION_PAGE_UP: scriptPageUp(wrap, view_cols, page_lines); afterMove(); break;
+        case ACTION_PAGE_DOWN: scriptPageDown(wrap, view_cols, page_lines); afterMove(); break;
         case ACTION_SELECT_ALL:
-            anchor = 0;
-            cursor = len;
+            scriptSelectAll();
             noteActivity();
             break;
         case ACTION_UNDO: doUndo(); break;
@@ -1515,7 +1453,7 @@ static void handleInput(bool ctrl, Metrics m) {
                 repeat_count_set = false;
                 for (size_t i = 0; i < reps; i++) insertBytes(enc, n);
                 if (reps > 1) echoFmt("insert '%.*s' x%zu", (int)n, (const char *)enc, reps);
-                goal_col_set = false;
+                scriptClearGoalColumn();
                 mark_active = false; // self-insert ends the mark (Emacs-style)
             }
             cp = platformCharPressed();
@@ -1573,11 +1511,11 @@ static void handleInput(bool ctrl, Metrics m) {
     if (platformMouseLeftPressed()) {
         cursor = offsetFromMouse(m);
         if (!shift) anchor = cursor;
-        goal_col_set = false;
+        scriptClearGoalColumn();
         noteActivity();
     } else if (platformMouseLeftDown()) {
         cursor = offsetFromMouse(m);
-        goal_col_set = false;
+        scriptClearGoalColumn();
         noteActivity();
     }
 }
@@ -1953,7 +1891,6 @@ void editorSetSelection(size_t anchor_pos, size_t cursor_pos) {
     if (cursor_pos > len) cursor_pos = len;
     anchor = anchor_pos;
     cursor = cursor_pos;
-    goal_col_set = false;
     noteActivity();
 }
 void editorApplyReplace(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
@@ -1986,6 +1923,19 @@ bool editorRegexSubstitute(const unsigned char *pattern, size_t pattern_len,
     *out_len = outlen;
     return true;
 }
+size_t editorLineStart(size_t pos) { return lineStart(pos); }
+size_t editorLineEnd(size_t pos) { return lineEnd(pos); }
+size_t editorColsIn(size_t start, size_t end) { return colsIn(start, end); }
+size_t editorByteAtCol(size_t start, size_t stop, size_t col) { return byteAtCol(start, stop, col); }
+size_t editorVisRows(size_t line_cols, size_t cols) { return visRows(line_cols, cols); }
+size_t editorStepLeft(size_t pos) { return stepLeft(pos); }
+size_t editorStepRight(size_t pos) { return stepRight(pos); }
+size_t editorWordStartLeft(size_t pos) { return wordStartLeft(pos); }
+size_t editorWordStartRight(size_t pos) { return wordStartRight(pos); }
+size_t editorWordEndRight(size_t pos) { return wordEndRight(pos); }
+size_t editorViewCols(void) { return view_cols; }
+size_t editorPageLines(void) { return page_lines; }
+size_t editorBufferLen(void) { return len; }
 
 int main(int argc, char **argv) {
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits

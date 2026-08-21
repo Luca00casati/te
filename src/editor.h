@@ -48,10 +48,11 @@ void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, si
 size_t editorUndoDepth(void);
 
 // Selects [anchorPos, cursorPos) as the current match/selection span: sets
-// both anchor and cursor, clears the remembered goal column (up/down
-// navigation shouldn't snap back to a column from before the jump), and
-// resets the cursor-blink clock -- exactly what the old static gotoMatch did.
-// Distinct from editorSetCursor, which doesn't touch anchor or goal_col_set.
+// both anchor and cursor and resets the cursor-blink clock -- exactly what
+// the old static gotoMatch did (the goal-column reset it also did is now
+// src/search.pl's goto_match/1 calling src/movement.pl's clear_goal_col
+// directly, since goal-column state lives in Prolog facts now). Distinct
+// from editorSetCursor, which doesn't touch anchor.
 void editorSetSelection(size_t anchor_pos, size_t cursor_pos);
 // Applies a replacement through the real edit() primitive (undo-recording,
 // same as typing), for an arbitrary [start, end) range rather than the
@@ -88,5 +89,46 @@ bool editorRegexSubstitute(const unsigned char *pattern, size_t pattern_len,
                            size_t match_start, size_t match_end,
                            const unsigned char *replacement, size_t replacement_len,
                            const unsigned char **out, size_t *out_len);
+
+// --- movement (src/movement.pl) -------------------------------------------
+// lineStart/lineEnd/colsIn/byteAtCol/visRows are also called every *frame*
+// by rendering/scrolling (wrapped-line layout, scroll-to-cursor, mouse
+// click->text mapping) -- these wrappers don't change that, they just give
+// src/movement.pl a way to call the same pure functions once per keypress,
+// the same dual-use pattern editorFindMatches/findMatches already has.
+
+// Byte offset of the start/end of the logical line containing `pos`.
+size_t editorLineStart(size_t pos);
+size_t editorLineEnd(size_t pos);
+// Sum of display columns (UTF-8/full-width-aware) in [start, end).
+size_t editorColsIn(size_t start, size_t end);
+// Byte offset of the `col`-th display column within [start, stop) -- never
+// splits a full-width glyph.
+size_t editorByteAtCol(size_t start, size_t stop, size_t col);
+// Visual rows a logical line of `line_cols` display columns occupies at
+// `cols` columns wide (>=1, so an empty line still takes one row).
+size_t editorVisRows(size_t line_cols, size_t cols);
+
+// One codepoint left/right of `pos`, skipping UTF-8 continuation bytes --
+// pure position in/out versions of the old moveLeft/moveRight (which
+// mutated the cursor directly); src/movement.pl decides what to do with
+// the result.
+size_t editorStepLeft(size_t pos);
+size_t editorStepRight(size_t pos);
+// Start of the previous word / start of the next word / end of the next
+// word from `pos` -- pure versions of the old moveWordStartLeft/Right and
+// moveWordEndRight.
+size_t editorWordStartLeft(size_t pos);
+size_t editorWordStartRight(size_t pos);
+size_t editorWordEndRight(size_t pos);
+
+// Current viewport metrics (recomputed every frame from the window size) --
+// so page-up/down and wrap-aware vertical movement know the viewport
+// without main.c threading it through every call.
+size_t editorViewCols(void);
+size_t editorPageLines(void);
+// Total buffer length -- cheaper than editorGetText when only the length
+// is needed (e.g. move-buffer-end, select-all).
+size_t editorBufferLen(void);
 
 #endif // TE_EDITOR_H
