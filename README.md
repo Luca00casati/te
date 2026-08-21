@@ -1,11 +1,12 @@
-# te — a simple GUI text editor in C + raylib
+# te — a simple GUI text editor in C + SDL2
 
-A minimal GUI text editor, currently built and tested on **Linux** (the code
-is portable C11, so other platforms are mainly a matter of adding their link
-steps to `nob.c`). Single window, monospace grid, load/edit/save a plain-text
-file. Built with [raylib](https://www.raylib.com/) and PCRE2 (both linked
-from the system install), plus a small from-scratch Prolog engine for
-scripting, using [nob](https://github.com/tsoding/nob.h) as the build system.
+A minimal GUI text editor, built and tested on **Linux only**. Single window,
+monospace grid, load/edit/save a plain-text file. Built with
+[SDL2](https://www.libsdl.org/) and PCRE2 (both linked from the system
+install, found via pkg-config), plus a small from-scratch Prolog engine for
+scripting and a vendored `stb_truetype`/`stb_image_write` for font
+rasterization/screenshot PNG output, using a plain GNU Makefile as the build
+system.
 
 Text is rendered with **[UnifontEX](https://github.com/stgiga/UnifontEX)** — a
 single font covering every Unicode plane — so Latin, Greek, Cyrillic, CJK,
@@ -104,7 +105,7 @@ none, 2 on error), so it pipes like `grep -P`. `--screenshot <frames> <path>`
 renders that many frames, writes a PNG, and exits.
 
 ```sh
-cc -o nob nob.c && ./nob            # produces ./te in the project root
+make -j$(nproc)                    # produces ./te in the project root
 ./te notes.txt                     # or: ./te   (defaults to untitled.txt)
 ./te --regex 'foo\d+' notes.txt    # headless: print matching lines, then exit
 cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
@@ -182,47 +183,42 @@ A list/control-predicate library — `member/2`, `memberchk/2`, `append/3`,
 startup rather than hand-coded in C: most of them don't need anything a
 native function can do that a recursive clause can't, so the engine
 dogfeeds its own unification/backtracking instead of duplicating that
-logic. `nob.c` bakes it into the binary at build time (`build/bootstrap_pl.h`,
-generated from that file) rather than reading it from disk at runtime like
-the font — it's core engine behavior, not user-swappable content, so a
-missing/moved file shouldn't be a way to break it. ISO-flavored, not a
-certified conformance suite.
+logic. The `Makefile` bakes it into the binary at build time
+(`build/bootstrap_pl.h`, generated from that file) rather than reading it
+from disk at runtime like the font — it's core engine behavior, not
+user-swappable content, so a missing/moved file shouldn't be a way to break
+it. ISO-flavored, not a certified conformance suite.
 
 ## Dependencies
 
-Linux, X11/OpenGL. Install:
+Linux. Install:
 
-- **raylib 6.0** and **libpcre2-8**, on your compiler's default include/library
-  search paths (build raylib from source and `[sudo] make install`, or your
-  distro's dev packages if it has them — e.g. `libpcre2-dev` on
-  Debian/Ubuntu). `nob.c` links them as plain `-lraylib -lpcre2-8`; if yours
-  land somewhere nonstandard, add the matching `-I`/`-L` flags there.
-- The system libraries raylib's static archive needs at link time:
-  ```sh
-  sudo apt install \
-    libgl-dev libx11-dev libxrandr-dev libxinerama-dev \
-    libxcursor-dev libxi-dev libxext-dev libxrender-dev libxfixes-dev
-  ```
-  (Other distros: the equivalent `mesa`/`libX11` `-devel` packages.)
+- **SDL2** (`libsdl2-dev`) and **libpcre2-8** (`libpcre2-dev`), discovered via
+  **pkg-config** (`sdl2.pc`/`libpcre2-8.pc` — your distro's dev packages, e.g.
+  on Debian/Ubuntu: `sudo apt install libsdl2-dev libpcre2-dev`). If
+  pkg-config can't find one, point `PKG_CONFIG_PATH` at the directory holding
+  its `.pc` file. The Makefile calls `pkg-config --cflags/--libs` directly —
+  no wrapper or generator step. SDL2 is linked as a shared library, so its own
+  transitive dependencies (X11, OpenGL, ALSA, ...) are resolved automatically
+  by the dynamic linker — nothing else to install for them.
 
-`UnifontExMono.ttf` is bundled in the repo, so nothing to fetch for it.
+`UnifontExMono.ttf` is bundled in the repo, so nothing to fetch for it, and
+`third_party/stb_truetype.h`/`stb_image_write.h` are vendored (public domain,
+single-header) — no separate font-rendering or image library to install.
 
 ## Building
 
 ```sh
-cc -o nob nob.c && ./nob   # produces ./te in the project root
-./nob run                  # build and run
+make -j$(nproc)   # produces ./te in the project root
+./te
 ```
 
-`nob` is a small C program (`nob.c`, using the vendored `nob.h`) that
-self-rebuilds when it changes; there's no separate build-system binary to
-install. It's currently Linux-only — see `nob.c` for where per-OS link steps
-would go to support macOS/Windows.
+Requires **GNU Make** and a C11 compiler (`cc`/`gcc`/`clang`). Linux-only.
 
 ## Testing
 
 ```sh
-./nob test
+make test
 ```
 
 Two suites, both under `tests/`:
@@ -241,14 +237,25 @@ Two suites, both under `tests/`:
 
 - `src/main.c` — the editor itself: a flat 1 MiB text buffer with a caret and
   selection anchor, all edits funnelled through one `edit()` primitive that
-  feeds operation-based undo/redo (typing coalesced into one step), clipboard
-  via raylib, mouse hit-testing, scrolling, and rendering (gutter line numbers,
-  selection highlight, blinking caret, status bar).
-- **Text rendering** covers all of Unicode. A common set of codepoints is baked
-  into a texture atlas; anything else (CJK, emoji, rarer scripts) is rasterized
-  on demand into a per-codepoint texture cache (`src/glyphs.c`), backed by a
-  small open-addressing hash table. Glyphs are drawn with `FONT_BITMAP` + point
-  filtering so UnifontEX stays pixel-crisp, and the column model is width-aware
+  feeds operation-based undo/redo (typing coalesced into one step), clipboard/
+  mouse hit-testing/scrolling via `src/platform.c`, and rendering (gutter line
+  numbers, selection highlight, blinking caret, status bar).
+- `src/platform.h`/`platform.c` — the only place `te` touches SDL directly:
+  window/renderer setup, per-frame input (turns SDL's event queue into
+  held/pressed/repeated/released query functions plus a typed-Unicode-
+  codepoint queue from `SDL_TEXTINPUT`), clipboard, timing, drawing
+  primitives, and `--screenshot`'s PNG capture. Every query function is a
+  documented no-op/safe-default before `platformInit()` runs, which is what
+  lets `tests/unit_te.c` `#include` `main.c` directly without ever opening a
+  window.
+- **Text rendering** covers all of Unicode via one lazy per-codepoint glyph
+  cache (`src/glyphs.c`, an open-addressing hash table of small SDL
+  textures) — every printable codepoint rasterizes through it on first use.
+  Rasterization is vendored `stb_truetype` (`third_party/stb_truetype.h`,
+  public domain — the same rasterizer raylib used internally before the
+  SDL2 switch), which keeps UnifontEX pixel-crisp at 16px-multiple sizes
+  without extra work: the coverage naturally lands on 0/255 when the glyph
+  outline sits on pixel boundaries. The column model is width-aware
   (full-width glyphs occupy two cells).
 - **The font is loaded from disk at startup**, from the same directory as the
   running executable. `UnifontExMono.ttf` is bundled in the repo rather than
@@ -265,13 +272,13 @@ Two suites, both under `tests/`:
   built-in predicate library. Not editor-specific — doesn't know `te` exists.
 - `src/bootstrap.pl` — the engine's own standard library (`member/2`,
   `maplist/2-4`, `between/3`, `succ/2`, ...), written in Prolog rather than C
-  (see Scripting above). `nob.c` turns it into `build/bootstrap_pl.h` (a byte
-  array baked into the binary) before compiling `src/prolog.c`, which
-  consults it once at `prologCreate`.
+  (see Scripting above). The `Makefile` turns it into `build/bootstrap_pl.h`
+  (a byte array baked into the binary, via `tools/gen_pl_header.sh`) before
+  compiling `src/prolog.c`, which consults it once at `prologCreate`.
 - `src/default_bindings.pl` — te's own key bindings/leader chords/commands,
   as `key_binding`/`key_binding_once`/`leader_binding`/`command` facts (see
   Scripting above) — what used to be the static `BINDINGS`/`PREFIX_BINDINGS`/
-  `COMMANDS` tables in `src/binding.h`. `nob.c` bakes it into
+  `COMMANDS` tables in `src/binding.h`. The `Makefile` bakes it into
   `build/default_bindings_pl.h`, the same way as `bootstrap.pl`;
   `scriptInit`/`scriptInitFromFile` in `script.c` consult it right after the
   user's `init.pl`.
@@ -285,14 +292,16 @@ Two suites, both under `tests/`:
   `handlePrefix` in `main.c` call `scriptHandleKey`/`scriptHandlePrefixKey`
   unconditionally, and `saveFile`/`openPath` call `scriptRunHook` for
   `hook/2` listeners.
-- `nob.c` compiles `src/main.c`, `src/glyphs.c`, `src/script.c`, and
-  `src/prolog.c` with `cc -std=c11` and links against the system-installed
-  raylib and libpcre2-8 (plain `-lraylib -lpcre2-8`; the Prolog engine adds no
-  external dependency), plus the Linux desktop system libraries raylib's
-  GLFW backend needs, into `./te` in the project root. It also generates
-  `build/bootstrap_pl.h` from `src/bootstrap.pl` and `build/default_bindings_pl.h`
-  from `src/default_bindings.pl` first, so `src/prolog.c`/`src/script.c` have
-  something to `#include`.
+- The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
+  `src/script.c`, and `src/prolog.c` as C11 and links against SDL2 and
+  libpcre2-8 (found via pkg-config; the Prolog engine adds no external
+  dependency) into `./te` in the project root — SDL2 is a shared library, so
+  its own transitive system dependencies resolve automatically at link time,
+  unlike raylib's old static archive. It also generates `build/bootstrap_pl.h` from
+  `src/bootstrap.pl`, `build/default_bindings_pl.h` from
+  `src/default_bindings.pl`, and `build/undo_history_pl.h` from
+  `src/undo_history.pl` first (via `tools/gen_pl_header.sh`), so
+  `src/prolog.c`/`src/script.c` have something to `#include`.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.
@@ -303,9 +312,9 @@ This project is licensed under the [MIT License](LICENSE).
 
 Third-party components keep their own licenses:
 
-- **raylib** (linked from the system install) — zlib/libpng license.
+- **SDL2** (linked from the system install) — zlib license.
 - **PCRE2** (linked from the system install) — BSD license.
+- **stb_truetype**/**stb_image_write** (vendored, `third_party/`) — public domain.
 - **UnifontEX** (bundled as `UnifontExMono.ttf`) — derived from GNU Unifont;
   distributed under the SIL Open Font License 1.1 and the GNU GPLv2 with the
   font-embedding exception.
-- **nob.h** (vendored, public domain) — https://github.com/tsoding/nob.h

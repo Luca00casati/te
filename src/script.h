@@ -72,4 +72,34 @@ bool scriptLeaderBindingGet(size_t i, int *key, Mod *mod, const char **label);
 size_t scriptCommandCount(void);
 bool scriptCommandGet(size_t i, const char **name);
 
+// --- undo/redo history (src/undo_history.pl) ------------------------------
+// The bookkeeping -- what to remember, coalescing a run of typing into one
+// step, evicting the oldest entry past editorUndoDepth() -- lives in
+// Prolog; the actual buffer splice is native (te_replace_range/3, called
+// from undo_step/redo_step). main.c's edit() calls scriptRecordEdit right
+// after computing the same removed/inserted/cursor snapshot its old Edit
+// struct held; doUndo/doRedo call scriptUndo/scriptRedo and keep only
+// their cursor/dirty/echo bookkeeping.
+
+// Records one edit for undo (pos, the bytes that left and entered the
+// buffer, and the cursor before/after) -- also clears the redo history and
+// evicts the oldest entry past the depth cap, same as the old pushUndo did.
+void scriptRecordEdit(size_t pos, const unsigned char *removed, size_t removed_len,
+                      const unsigned char *inserted, size_t inserted_len,
+                      size_t cur_before, size_t cur_after);
+// Undoes the most recent recorded edit (restoring its pre-edit cursor) and
+// moves it to the redo history. Returns false if there's nothing to undo.
+bool scriptUndo(void);
+// Re-applies the most recently undone edit (restoring its post-edit cursor)
+// and moves it back to the undo history. Returns false if there's nothing
+// to redo.
+bool scriptRedo(void);
+// True if the undo history is now empty -- main.c checks this right after
+// a successful scriptUndo() to decide whether to clear the dirty flag and
+// echo "no more undo" again, matching the old undo_n==0 check.
+bool scriptUndoStackEmpty(void);
+// Resets both histories to empty, e.g. after opening a file or saving (the
+// buffer on disk is the new baseline, so old undo/redo steps no longer apply).
+void scriptClearHistory(void);
+
 #endif // TE_SCRIPT_H

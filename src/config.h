@@ -2,7 +2,7 @@
 #ifndef TE_CONFIG_H
 #define TE_CONFIG_H
 
-#include "raylib.h"
+#include "platform.h"
 
 
 #define CFG_TARGET_FPS 60
@@ -13,8 +13,6 @@
 // of 16 (16, 32, ...) stay pixel-crisp; other sizes rasterize with uneven,
 // "wobbly" stems.
 #define CFG_FONT_SIZE 16.0f
-// Extra horizontal space between glyphs.
-#define CFG_FONT_SPACING 0.0f
 // Extra vertical space between lines (line height = size + line_gap).
 #define CFG_FONT_LINE_GAP 4.0f
 

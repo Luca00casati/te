@@ -8,8 +8,8 @@
 #ifndef TE_BINDING_H
 #define TE_BINDING_H
 
+#include <stdbool.h>
 #include <stddef.h>
-#include "raylib.h"
 
 // Things the editor can do in response to a key. main.c implements each.
 typedef enum {

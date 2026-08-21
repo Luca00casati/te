@@ -1,6 +1,6 @@
 #define _DEFAULT_SOURCE // mkdtemp
 // Black-box tests for `te`'s headless `--regex` mode: run the actual
-// compiled binary as a subprocess (no raylib window ever opens on this path,
+// compiled binary as a subprocess (no SDL window ever opens on this path,
 // see grepMode() in main.c) and check its stdout, exit code, and file output
 // against a handful of small fixture files.
 //

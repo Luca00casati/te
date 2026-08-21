@@ -5,14 +5,16 @@
 // that logic without a large refactor is to #include the source directly, so
 // its statics become ordinary file-scope symbols here. main() is renamed out
 // of the way first so it is never linked in as `main` and never called --
-// nothing in this file ever creates a raylib window.
+// nothing in this file ever creates an SDL window.
 //
-// GetTime()/IsKeyPressed() (called incidentally by edit()/echo()) are safe to
-// call pre-InitWindow: raylib just reads its zeroed global state. Two things
-// are NOT safe and are deliberately never exercised here: SetClipboardText/
-// GetClipboardText (need a live GLFW window) and any codepoint outside
-// inAtlas()'s ranges (glyphs_get() would try to upload a GPU texture). Tests
-// below stick to ASCII/Latin/Greek/Cyrillic, which inAtlas() covers.
+// platformTime()/platformKeyPressed() (called incidentally by edit()/echo())
+// are safe to call pre-platformInit: every platform* query function is an
+// explicit, documented no-op/safe-default before platformInit runs (see
+// platform.h). Two things are NOT safe and are deliberately never exercised
+// here: platformSetClipboardText/platformGetClipboardText (need a live SDL
+// video subsystem) and any codepoint outside inAtlas()'s ranges (glyphs_get()
+// would try to create an SDL texture). Tests below stick to ASCII/Latin/
+// Greek/Cyrillic, which inAtlas() covers.
 #define main te_disabled_main
 #include "../src/main.c"
 #undef main
@@ -194,21 +196,21 @@ static void test_undo_coalesces_single_char_typing(void) {
     insertBytes((const unsigned char *)"b", 1);
     insertBytes((const unsigned char *)"c", 1);
     CHECK(textEquals("abc"));
-    CHECK(undo_n == 1); // three keystrokes, one undo step
     doUndo();
-    CHECK(textEquals(""));
-    CHECK(undo_n == 0);
+    CHECK(textEquals("")); // three keystrokes coalesced into one undo step
+    CHECK(scriptUndoStackEmpty());
 }
 
 static void test_undo_does_not_coalesce_across_newline(void) {
     setText("");
     insertBytes((const unsigned char *)"a", 1);
     insertBytes((const unsigned char *)"\n", 1);
-    CHECK(undo_n == 2); // newline breaks the coalescing run
     doUndo();
-    CHECK(textEquals("a"));
+    CHECK(textEquals("a")); // newline breaks the coalescing run: one undo only removes it
+    CHECK(!scriptUndoStackEmpty());
     doUndo();
     CHECK(textEquals(""));
+    CHECK(scriptUndoStackEmpty());
 }
 
 static void test_undo_multistep(void) {
@@ -222,7 +224,7 @@ static void test_undo_multistep(void) {
     CHECK(textEquals("abcDEF"));
     doUndo();
     CHECK(textEquals("abc"));
-    CHECK(undo_n == 0);
+    CHECK(scriptUndoStackEmpty());
     CHECK(!dirty);
 }
 
@@ -459,6 +461,13 @@ static void test_script_hooks_fire_on_save_and_open(void) {
 }
 
 int main(void) {
+    // Undo/redo now goes through the Prolog engine (src/undo_history.pl),
+    // so it needs one alive -- a nonexistent init.pl still loads
+    // bootstrap.pl/default_bindings.pl/undo_history.pl, which is all any
+    // test below the script-specific ones needs. Torn down again right
+    // before those (each sets up its own fixture-specific engine).
+    scriptInitFromFile("tests/fixtures/does_not_exist.pl");
+
     RUN(test_utf8_roundtrip);
     RUN(test_utf8_malformed_falls_back);
     RUN(test_isCont);
@@ -498,6 +507,7 @@ int main(void) {
     RUN(test_save_and_read_roundtrip);
     RUN(test_read_missing_file);
 
+    scriptShutdown(); // the script-specific tests below set up their own engine each
     RUN(test_script_loads_and_runs_api);
     RUN(test_script_error_is_echoed_not_fatal);
     RUN(test_script_hooks_fire_on_save_and_open);

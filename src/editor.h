@@ -31,4 +31,13 @@ bool editorGetMarkActive(void);
 // BINDINGS loop did inline.
 void editorSetSelExtend(bool extend);
 
+// Raw byte-level buffer splice, no undo bookkeeping -- src/undo_history.pl
+// is the only caller (via te_replace_range/3), for undo_step/redo_step
+// actually applying a stored edit record. Mirrors the existing static
+// replaceRange in main.c exactly.
+void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
+// CFG_UNDO_DEPTH (src/config.h), exposed so src/undo_history.pl's eviction
+// cap has one source of truth instead of a second copy of the number.
+size_t editorUndoDepth(void);
+
 #endif // TE_EDITOR_H

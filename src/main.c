@@ -11,7 +11,7 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 
-#include "raylib.h"
+#include "platform.h"
 #include "config.h"
 #include "binding.h"
 #include "glyphs.h"
@@ -27,17 +27,6 @@ typedef struct { uint32_t cp; size_t len; } Cp;
 typedef struct { size_t start, end; } Span;
 typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; } Metrics;
 
-// Undo / redo: each record can reverse one edit. `removed`/`inserted` are
-// malloc-owned copies of the text that left and entered the buffer.
-typedef struct {
-    size_t pos;
-    unsigned char *removed;
-    size_t removed_len;
-    unsigned char *inserted;
-    size_t inserted_len;
-    size_t cur_before, cur_after;
-} Edit;
-
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
 typedef enum { MBI_NONE, MBI_FIND_FILE, MBI_WRITE_FILE, MBI_SEARCH, MBI_REPLACE_FROM, MBI_REPLACE_TO, MBI_QUIT, MBI_COMMAND } MbIntent;
 typedef enum { HELP_NONE, HELP_NAV, HELP_COMMANDS } HelpKind;
@@ -45,15 +34,6 @@ typedef enum { HELP_NONE, HELP_NAV, HELP_COMMANDS } HelpKind;
 // --- font (loaded from disk at runtime, next to the executable) --------
 static unsigned char *font_bytes = NULL;
 static size_t font_bytes_len = 0;
-
-// The editor renders entirely with UnifontEX. The common codepoints below are
-// baked into a shared texture atlas for fast batched drawing; everything else
-// (CJK, emoji, rarer scripts) is rasterized on demand by glyphs.c. Cover Basic
-// Latin, Latin-1/Extended, Greek, and Cyrillic, plus common typographic
-// punctuation (dashes, curly quotes, ellipsis...). inAtlas() must match this set.
-#define FONT_CODEPOINTS_MAX 1200
-static int font_codepoints[FONT_CODEPOINTS_MAX];
-static size_t font_codepoints_count = 0;
 
 // `--screenshot <frames> <path>`: after rendering `frames` frames, save a PNG
 // to `path` and quit. Handy for headless verification. 0 = disabled.
@@ -121,7 +101,7 @@ static bool prefix_pending = false;
 static uint8_t ctrl_taps = 0;
 static bool ctrl_clean = false; // current Ctrl hold has seen no other key yet
 
-// Frames left to drop stray GetCharPressed() events after a chord/toggle key
+// Frames left to drop stray platformCharPressed() events after a chord/toggle key
 // (e.g. leader-S for Save, C-m for modal) resolves an action rather than
 // self-inserting. GLFW/X11 can deliver that keypress's character event a
 // frame or two late -- observed with IBus and similar async input methods --
@@ -170,12 +150,10 @@ static bool match_truncated = false;
 static size_t search_index = 0; // which match is currently selected (for X/N)
 
 // ---------------------------------------------------------------------------
-// Undo / redo
+// Undo / redo: the history itself (src/undo_history.pl) and the raw buffer
+// splice (replaceRange) are the only pieces left in C -- see edit()/doUndo()/
+// doRedo() below.
 // ---------------------------------------------------------------------------
-static Edit undo_stack[CFG_UNDO_DEPTH];
-static size_t undo_n = 0;
-static Edit redo_stack[CFG_UNDO_DEPTH];
-static size_t redo_n = 0;
 
 // --- forward declarations (definitions follow, mirroring main.zig's layout) -
 static void noteActivity(void);
@@ -186,8 +164,6 @@ static void insertBytes(const unsigned char *bytes, size_t n);
 static void deleteSelection(void);
 static void deleteBack(void);
 static void deleteForward(void);
-static void clearRedo(void);
-static void pushUndo(Edit e);
 static void doUndo(void);
 static void doRedo(void);
 static void freeHistory(void);
@@ -240,8 +216,8 @@ static bool grepMode(int argc, char **argv);
 static void handleInput(bool ctrl, Metrics m);
 static void detectCtrlTaps(void);
 static void handlePrefix(bool ctrl);
-static void drawMinibuffer(Font font, float char_w, float y, char *tmp, size_t tmp_cap);
-static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap);
+static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap);
+static void drawHelp(float char_w, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap);
 
 // --- small helpers -----------------------------------------------------
 static bool isCont(unsigned char byte) { return (byte & 0xC0) == 0x80; }
@@ -251,14 +227,14 @@ static size_t selMax(void) { return anchor > cursor ? anchor : cursor; }
 static size_t clampz(size_t v, size_t lo, size_t hi) { return v < lo ? lo : (v > hi ? hi : v); }
 static size_t satsub(size_t a, size_t b) { return a > b ? a - b : 0; }
 
-static void noteActivity(void) { blink_base = GetTime(); }
+static void noteActivity(void) { blink_base = platformTime(); }
 
 static void echo(const char *msg) {
     size_t mlen = strlen(msg);
     size_t m = mlen < sizeof(echo_buf) ? mlen : sizeof(echo_buf);
     memcpy(echo_buf, msg, m);
     echo_len = m;
-    echo_time = GetTime();
+    echo_time = platformTime();
 }
 static void echoFmt(const char *fmt, ...) {
     va_list ap;
@@ -270,7 +246,7 @@ static void echoFmt(const char *fmt, ...) {
         return;
     }
     echo_len = (size_t)n < sizeof(echo_buf) ? (size_t)n : sizeof(echo_buf) - 1;
-    echo_time = GetTime();
+    echo_time = platformTime();
 }
 
 // --- buffer mutation -----------------------------------------------------
@@ -283,31 +259,21 @@ static void replaceRange(size_t start, size_t end, const unsigned char *bytes, s
     len = new_end + tail_len;
 }
 
-static unsigned char *dupeBytes(const unsigned char *src, size_t n) {
-    unsigned char *p = malloc(n > 0 ? n : 1);
-    if (!p) return NULL;
-    if (n > 0) memcpy(p, src, n);
-    return p;
-}
-
-// Replace text[start..end] with bytes, recording it for undo.
+// Replace text[start..end] with bytes, recording it for undo. The removed
+// bytes must be captured (via scriptRecordEdit, which copies them into its
+// own Prolog term representation immediately) *before* replaceRange
+// overwrites them -- no local malloc'd copy needed anymore, script.c's
+// src/undo_history.pl owns the history bookkeeping (coalescing a run of
+// typing, evicting the oldest entry past the depth cap, clearing redo).
 static void edit(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
     if (len - (end - start) + bytes_len > TEXT_CAP) return;
-    unsigned char *removed = dupeBytes(text + start, end - start);
-    if (!removed) return;
-    unsigned char *inserted = dupeBytes(bytes, bytes_len);
-    if (!inserted) {
-        free(removed);
-        return;
-    }
     size_t cur_before = cursor;
+    size_t cur_after = start + bytes_len;
+    scriptRecordEdit(start, text + start, end - start, bytes, bytes_len, cur_before, cur_after);
     replaceRange(start, end, bytes, bytes_len);
-    cursor = start + bytes_len;
+    cursor = cur_after;
     anchor = cursor;
     dirty = true;
-    clearRedo();
-    Edit e = { start, removed, end - start, inserted, bytes_len, cur_before, cursor };
-    pushUndo(e);
     noteActivity();
 }
 
@@ -340,82 +306,28 @@ static void deleteForward(void) {
 }
 
 // --- undo / redo -----------------------------------------------------------
-static void freeEdit(Edit *e) {
-    free(e->removed);
-    free(e->inserted);
-}
-static void evictOldest(Edit *stack, size_t *n) {
-    freeEdit(&stack[0]);
-    memmove(&stack[0], &stack[1], (*n - 1) * sizeof(Edit));
-    (*n)--;
-}
-static void pushUndo(Edit e) {
-    // Coalesce a run of single-character typing into one undo step.
-    if (undo_n > 0) {
-        Edit *top = &undo_stack[undo_n - 1];
-        if (top->removed_len == 0 && e.removed_len == 0 &&
-            e.inserted_len == 1 && e.inserted[0] != '\n' &&
-            e.pos == top->pos + top->inserted_len) {
-            unsigned char *grown = realloc(top->inserted, top->inserted_len + 1);
-            if (grown) {
-                grown[top->inserted_len] = e.inserted[0];
-                top->inserted = grown;
-                top->inserted_len += 1;
-                top->cur_after = e.cur_after;
-                free(e.removed);
-                free(e.inserted);
-                return;
-            }
-        }
-    }
-    if (undo_n == CFG_UNDO_DEPTH) evictOldest(undo_stack, &undo_n);
-    undo_stack[undo_n] = e;
-    undo_n++;
-}
-static void pushRaw(Edit *stack, size_t *n, Edit e) {
-    if (*n == CFG_UNDO_DEPTH) evictOldest(stack, n);
-    stack[*n] = e;
-    (*n)++;
-}
-static void clearRedo(void) {
-    for (size_t i = 0; i < redo_n; i++) freeEdit(&redo_stack[i]);
-    redo_n = 0;
-}
+// The history (coalescing, eviction, what undo/redo actually restore) lives
+// in src/undo_history.pl now; these just keep the cursor/dirty/echo
+// bookkeeping that isn't history storage, mirroring the old messages exactly.
 static void doUndo(void) {
-    if (undo_n == 0) {
+    if (!scriptUndo()) {
         echo("no more undo");
         return;
     }
-    undo_n--;
-    Edit e = undo_stack[undo_n];
-    replaceRange(e.pos, e.pos + e.inserted_len, e.removed, e.removed_len);
-    cursor = e.cur_before;
-    anchor = cursor;
-    pushRaw(redo_stack, &redo_n, e);
     noteActivity();
     // Undone back to the start: the buffer matches where history began, so
     // treat the file as untouched again.
-    if (undo_n == 0) {
+    if (scriptUndoStackEmpty()) {
         dirty = false;
         echo("no more undo");
     } else dirty = true;
 }
 static void doRedo(void) {
-    if (redo_n == 0) return;
-    redo_n--;
-    Edit e = redo_stack[redo_n];
-    replaceRange(e.pos, e.pos + e.removed_len, e.inserted, e.inserted_len);
-    cursor = e.cur_after;
-    anchor = cursor;
+    if (!scriptRedo()) return;
     dirty = true;
-    pushRaw(undo_stack, &undo_n, e);
     noteActivity();
 }
-static void freeHistory(void) {
-    for (size_t i = 0; i < undo_n; i++) freeEdit(&undo_stack[i]);
-    undo_n = 0;
-    clearRedo();
-}
+static void freeHistory(void) { scriptClearHistory(); }
 
 // --- cursor movement (pure caret; selection handled by caller) -------------
 static void moveLeft(void) {
@@ -649,37 +561,69 @@ static size_t byteAtCol(size_t start, size_t stop, size_t col) {
     return i;
 }
 
-// Draw text[s..e] from pixel (x0, y): consecutive atlas codepoints are batched
-// into one DrawTextEx run, while each fall-back glyph (CJK, emoji, rarer
-// scripts) is blitted from the lazy Unifont cache into its cell(s).
-static unsigned char draw_tmp[8192];
-static void flushRun(Font font, float fsize, float sp, size_t a, size_t b, float x, float y, Color color) {
-    if (b <= a) return;
-    size_t n = (b - a) < (sizeof(draw_tmp) - 1) ? (b - a) : (sizeof(draw_tmp) - 1);
-    memcpy(draw_tmp, text + a, n);
-    draw_tmp[n] = 0;
-    DrawTextEx(font, (const char *)draw_tmp, (Vector2){ x, y }, fsize, sp, color);
+// Draws one glyph at pixel (x, y) tinted `color`, returning x advanced by
+// its cell width -- the one primitive drawCells/drawStr both walk with.
+// Every printable codepoint goes through glyphs_get (no separate atlas
+// texture/batched string draw -- SDL has no equivalent to build one from,
+// and the lazy cache already does exactly this for CJK/emoji today).
+static float drawCp(uint32_t cp, float x, float y, float cw, Color color) {
+    if (cp < 0x20) return x + cw;
+    Glyph g = glyphs_get(cp);
+    if (g.has) platformDrawTexture(g.tex, x + g.ox, y + g.oy, color);
+    return x + (float)g.cells * cw;
 }
-static void drawCells(Font font, float cw, float fsize, float sp, float x0, float y, size_t s, size_t e, Color color) {
+// Draw text[s..e] from pixel (x0, y), one glyph per cell.
+static void drawCells(float cw, float x0, float y, size_t s, size_t e, Color color) {
     float x = x0;
-    size_t i = s, run_start = s;
-    float run_x = x0;
+    size_t i = s;
     while (i < e) {
         Cp d = decodeCp(i, e);
-        if (d.cp < 0x20 || inAtlas(d.cp)) {
-            x += cw;
-            i += d.len;
-            continue;
-        }
-        flushRun(font, fsize, sp, run_start, i, run_x, y, color);
-        Glyph g = glyphs_get(d.cp);
-        if (g.has) DrawTextureV(g.tex, (Vector2){ x + g.ox, y + g.oy }, color);
-        x += (float)g.cells * cw;
+        x = drawCp(d.cp, x, y, cw, color);
         i += d.len;
-        run_start = i;
-        run_x = x;
     }
-    flushRun(font, fsize, sp, run_start, i, run_x, y, color);
+}
+// Decodes one UTF-8 codepoint from a plain C string at b[i] (same leniency
+// as decodeCp, just over an arbitrary buffer instead of the text[] buffer).
+static Cp decodeCpStr(const unsigned char *b, size_t i, size_t n) {
+    size_t len = utf8SeqLen(b[i]);
+    uint32_t cp = b[i];
+    if (len >= 2 && i + len <= n) {
+        cp = (len == 2) ? (b[i] & 0x1F) : (len == 3) ? (b[i] & 0x0F) : (b[i] & 0x07);
+        bool ok = true;
+        for (size_t k = 1; k < len; k++) {
+            if ((b[i + k] & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (b[i + k] & 0x3F);
+        }
+        if (!ok) { cp = b[i]; len = 1; }
+    } else len = 1;
+    Cp out = { cp, len };
+    return out;
+}
+// Draw a NUL-terminated UTF-8 C string (minibuffer/status/help labels --
+// fixed text, not a text[] buffer range) from pixel (x0, y).
+static void drawStr(const char *s, float cw, float x0, float y, Color color) {
+    float x = x0;
+    const unsigned char *b = (const unsigned char *)s;
+    size_t i = 0, n = strlen(s);
+    while (i < n) {
+        Cp d = decodeCpStr(b, i, n);
+        x = drawCp(d.cp, x, y, cw, color);
+        i += d.len;
+    }
+}
+// Pixel width of a plain C string, same cell-width model as drawStr but
+// without drawing -- replaces the one MeasureTextEx(font, mb_prompt, ...)
+// call for positioning text after the (fixed, ASCII) minibuffer prompt.
+static float strWidth(const char *s, float cw) {
+    const unsigned char *b = (const unsigned char *)s;
+    size_t i = 0, n = strlen(s);
+    float w = 0;
+    while (i < n) {
+        Cp d = decodeCpStr(b, i, n);
+        w += (d.cp < 0x20) ? cw : (float)cpCells(d.cp) * cw;
+        i += d.len;
+    }
+    return w;
 }
 
 // --- clipboard -------------------------------------------------------------
@@ -690,7 +634,7 @@ static void copyRange(size_t a, size_t b) {
     if (!buf) return;
     memcpy(buf, text + a, n);
     buf[n] = 0;
-    SetClipboardText(buf);
+    platformSetClipboardText(buf);
     free(buf);
 }
 static void copySelection(void) {
@@ -744,7 +688,7 @@ static void swapLine(bool down) {
 }
 // Paste the clipboard as whole line(s) above the current line.
 static void pasteLine(void) {
-    const char *c = GetClipboardText();
+    const char *c = platformGetClipboardText();
     if (c == NULL) return;
     size_t slen = strlen(c);
     if (slen == 0) return;
@@ -761,7 +705,7 @@ static void pasteLine(void) {
     }
 }
 static void pasteClipboard(void) {
-    const char *c = GetClipboardText();
+    const char *c = platformGetClipboardText();
     if (c == NULL) return;
     size_t slen = strlen(c);
     if (slen > 0) insertBytes((const unsigned char *)c, slen);
@@ -1278,17 +1222,17 @@ static void mbConfirm(void) {
 static void handleMinibuffer(bool ctrl) {
     if (mb_kind == MB_CHAR_QUERY) {
         // currently only the quit question
-        if (IsKeyPressed(KEY_Y) || IsKeyPressed(KEY_S)) {
+        if (platformKeyPressed(SDL_SCANCODE_Y) || platformKeyPressed(SDL_SCANCODE_S)) {
             if (saveFile()) {
                 running = false;
             } else {
                 echo("Save failed");
                 mbClose();
             }
-        } else if (IsKeyPressed(KEY_N)) {
+        } else if (platformKeyPressed(SDL_SCANCODE_N)) {
             running = false;
-        } else if (IsKeyPressed(KEY_C) || IsKeyPressed(KEY_ESCAPE) ||
-                   (ctrl && IsKeyPressed(KEY_G))) {
+        } else if (platformKeyPressed(SDL_SCANCODE_C) || platformKeyPressed(SDL_SCANCODE_ESCAPE) ||
+                   (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
             mbClose();
             quit_requested = false;
         }
@@ -1297,14 +1241,14 @@ static void handleMinibuffer(bool ctrl) {
 
     if (mb_kind == MB_REPLACE_QUERY) {
         // Interactive query-replace: Enter replaces & advances, n/p navigate.
-        if (IsKeyPressed(KEY_ESCAPE) || (ctrl && IsKeyPressed(KEY_G))) {
+        if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
             echo("Replace done");
             mbClose();
-        } else if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        } else if (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER)) {
             replaceCurrentMatch();
-        } else if (pressed(KEY_N)) {
+        } else if (pressed(SDL_SCANCODE_N)) {
             replaceStep(true);
-        } else if (pressed(KEY_P)) {
+        } else if (pressed(SDL_SCANCODE_P)) {
             replaceStep(false);
         }
         return;
@@ -1312,7 +1256,7 @@ static void handleMinibuffer(bool ctrl) {
 
     // text_prompt
     bool is_search = mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM;
-    if (IsKeyPressed(KEY_ESCAPE) || (ctrl && IsKeyPressed(KEY_G))) {
+    if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
         if (is_search) { // abort returns to where the search began
             anchor = search_origin;
             cursor = search_origin;
@@ -1321,28 +1265,28 @@ static void handleMinibuffer(bool ctrl) {
         mbClose();
         return;
     }
-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+    if (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER)) {
         mbConfirm();
         return;
     }
-    if (IsKeyPressed(KEY_TAB)) {
+    if (platformKeyPressed(SDL_SCANCODE_TAB)) {
         mbComplete();
         return;
     }
     // In the search/replace-pattern prompt, C-n / C-p jump between matches.
     if (is_search && ctrl) {
-        if (pressed(KEY_N)) {
+        if (pressed(SDL_SCANCODE_N)) {
             searchStep(true);
             return;
         }
-        if (pressed(KEY_P)) {
+        if (pressed(SDL_SCANCODE_P)) {
             searchStep(false);
             return;
         }
     }
     bool changed = false;
     if (!ctrl) {
-        int cp = GetCharPressed();
+        int cp = platformCharPressed();
         while (cp > 0) {
             unsigned char enc[4];
             size_t n = utf8Encode((uint32_t)cp, enc);
@@ -1350,23 +1294,23 @@ static void handleMinibuffer(bool ctrl) {
                 mbInsert(enc, n);
                 changed = true;
             }
-            cp = GetCharPressed();
+            cp = platformCharPressed();
         }
     }
-    if (pressed(KEY_BACKSPACE)) {
+    if (pressed(SDL_SCANCODE_BACKSPACE)) {
         mbBackspace();
         changed = true;
     }
-    if (pressed(KEY_LEFT) && mb_cursor > 0) {
+    if (pressed(SDL_SCANCODE_LEFT) && mb_cursor > 0) {
         mb_cursor--;
         while (mb_cursor > 0 && isCont((unsigned char)mb_input[mb_cursor])) mb_cursor--;
     }
-    if (pressed(KEY_RIGHT) && mb_cursor < mb_len) {
+    if (pressed(SDL_SCANCODE_RIGHT) && mb_cursor < mb_len) {
         mb_cursor++;
         while (mb_cursor < mb_len && isCont((unsigned char)mb_input[mb_cursor])) mb_cursor++;
     }
-    if (pressed(KEY_HOME)) mb_cursor = 0;
-    if (pressed(KEY_END)) mb_cursor = mb_len;
+    if (pressed(SDL_SCANCODE_HOME)) mb_cursor = 0;
+    if (pressed(SDL_SCANCODE_END)) mb_cursor = mb_len;
     // Incremental search: re-run and jump to the nearest match as you type.
     if (changed && is_search) searchUpdate();
 }
@@ -1519,14 +1463,15 @@ static void applyAction(Action action) {
 }
 
 // True on initial press and on key autorepeat.
-static bool pressed(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
+static bool pressed(int key) { return platformKeyPressed(key) || platformKeyPressedRepeat(key); }
 
 // --- pixel <-> text mapping ------------------------------------------------
 static size_t offsetFromMouse(Metrics m) {
-    Vector2 mp = GetMousePosition();
-    float rf = (mp.y - CFG_MARGIN_Y) / m.line_h;
+    float mx, my;
+    platformMousePos(&mx, &my);
+    float rf = (my - CFG_MARGIN_Y) / m.line_h;
     if (rf < 0) rf = 0;
-    float cf = (mp.x - m.text_x0) / m.char_w + 0.5f;
+    float cf = (mx - m.text_x0) / m.char_w + 0.5f;
     if (cf < 0) cf = 0;
     size_t click_col = (size_t)cf;
     if (wrap) {
@@ -1693,7 +1638,7 @@ static void handleInput(bool ctrl, Metrics m) {
     // minibuffer, when open, handles Esc itself).
     // In modal mode a bare key acts like its Ctrl-chord.
     bool cmd = ctrl || modal;
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (platformKeyPressed(SDL_SCANCODE_ESCAPE)) {
         anchor = cursor;
         mark_active = false;
         repeat_count_set = false;
@@ -1701,7 +1646,7 @@ static void handleInput(bool ctrl, Metrics m) {
         noteActivity();
     }
     if (!cmd) {
-        int cp = GetCharPressed();
+        int cp = platformCharPressed();
         while (cp > 0) {
             unsigned char enc[4];
             size_t n = utf8Encode((uint32_t)cp, enc);
@@ -1715,17 +1660,17 @@ static void handleInput(bool ctrl, Metrics m) {
                 goal_col_set = false;
                 mark_active = false; // self-insert ends the mark (Emacs-style)
             }
-            cp = GetCharPressed();
+            cp = platformCharPressed();
         }
     }
     // C-Enter opens a blank line below; C-Shift-Enter opens one above. Handled
     // here (not via the table) so the plain-Enter binding doesn't also fire.
-    if (ctrl && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+    if (ctrl && (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER))) {
         runAction(shift ? ACTION_OPEN_LINE_ABOVE : ACTION_OPEN_LINE_BELOW);
         return;
     }
     // C-Space (or bare Space in modal) toggles the mark; movement then extends.
-    if (cmd && IsKeyPressed(KEY_SPACE)) {
+    if (cmd && platformKeyPressed(SDL_SCANCODE_SPACE)) {
         mark_active = !mark_active;
         anchor = cursor;
         echo(mark_active ? "Mark set" : "Mark deactivated");
@@ -1733,9 +1678,14 @@ static void handleInput(bool ctrl, Metrics m) {
         return;
     }
     // C-<digit> (or bare digit in modal) accumulates a repeat count.
+    // SDL_SCANCODE_1..9/KP_1..9 are sequential but SDL_SCANCODE_0/KP_0 comes
+    // *after* 9, not before -- unlike raylib's KEY_ZERO..KEY_NINE, so d==0
+    // needs its own scancode rather than d-based arithmetic from a zero base.
     if (cmd && !shift) {
         for (int d = 0; d <= 9; d++) {
-            if (IsKeyPressed(KEY_ZERO + d) || IsKeyPressed(KEY_KP_0 + d)) {
+            int digit_key = (d == 0) ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + (d - 1);
+            int kp_key = (d == 0) ? SDL_SCANCODE_KP_0 : SDL_SCANCODE_KP_1 + (d - 1);
+            if (platformKeyPressed(digit_key) || platformKeyPressed(kp_key)) {
                 size_t cur = repeat_count_set ? repeat_count_val : 0;
                 size_t nv = cur * 10 + (size_t)d;
                 repeat_count_val = nv < 9999 ? nv : 9999;
@@ -1753,7 +1703,7 @@ static void handleInput(bool ctrl, Metrics m) {
     // script.c's matchAndRun), via the editorIsNavAction/editorGetMarkActive/
     // editorSetSelExtend calls it makes back into this file.
     scriptHandleKey(ctrl, shift, modal);
-    float wheel = GetMouseWheelMove();
+    float wheel = platformMouseWheel();
     if (wheel != 0) {
         // With wrap, lines vary in height, so just stop at the last line.
         size_t max_top = wrap ? (lineCount() - 1) : (lineCount() > m.visible ? lineCount() - m.visible : 0);
@@ -1762,12 +1712,12 @@ static void handleInput(bool ctrl, Metrics m) {
         if (nt > (long long)max_top) nt = (long long)max_top;
         top_line = (size_t)nt;
     }
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    if (platformMouseLeftPressed()) {
         cursor = offsetFromMouse(m);
         if (!shift) anchor = cursor;
         goal_col_set = false;
         noteActivity();
-    } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+    } else if (platformMouseLeftDown()) {
         cursor = offsetFromMouse(m);
         goal_col_set = false;
         noteActivity();
@@ -1779,20 +1729,20 @@ static void handleInput(bool ctrl, Metrics m) {
 // the command prompt. There is no timeout -- the count resets only when a
 // non-Ctrl key is pressed -- so a pause between taps still gets you there.
 // Runs only in normal editing mode. Draining the key-pressed queue here is
-// safe: bindings use IsKeyPressed and text uses GetCharPressed, both
-// independent of it.
+// safe: bindings use platformKeyPressed and text uses platformCharPressed,
+// both independent of it.
 static void detectCtrlTaps(void) {
-    int lc = KEY_LEFT_CONTROL, rc = KEY_RIGHT_CONTROL;
-    if (IsKeyPressed(lc) || IsKeyPressed(rc)) ctrl_clean = true;
-    int k = GetKeyPressed();
+    int lc = SDL_SCANCODE_LCTRL, rc = SDL_SCANCODE_RCTRL;
+    if (platformKeyPressed(lc) || platformKeyPressed(rc)) ctrl_clean = true;
+    int k = platformKeyPressedQueue();
     while (k != 0) {
         if (k != lc && k != rc) {
             ctrl_clean = false; // a real key was pressed with Ctrl: not a tap
             ctrl_taps = 0;      // and it breaks any tap run in progress
         }
-        k = GetKeyPressed();
+        k = platformKeyPressedQueue();
     }
-    if (IsKeyReleased(lc) || IsKeyReleased(rc)) {
+    if (platformKeyReleased(lc) || platformKeyReleased(rc)) {
         if (ctrl_clean) {
             ctrl_taps++;
             if (ctrl_taps == 2) {
@@ -1812,7 +1762,7 @@ static void detectCtrlTaps(void) {
 // fires a shortcut directly. Chords match with Ctrl optional (leader s ==
 // leader C-s); Shift selects shifted variants.
 static void handlePrefix(bool ctrl) {
-    if (IsKeyPressed(KEY_ESCAPE) || (ctrl && IsKeyPressed(KEY_G))) {
+    if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
         prefix_pending = false;
         echo("Quit");
         return;
@@ -1824,63 +1774,62 @@ static void handlePrefix(bool ctrl) {
         // See the matching drain below: swallow a same-key char event GLFW
         // may still have queued (or deliver a frame or two late under async
         // IME) so it isn't typed into the buffer or a prompt afterward.
-        while (GetCharPressed() != 0) {}
+        while (platformCharPressed() != 0) {}
         swallow_char_frames = 3;
         return;
     }
     // leader n -> key/navigation help overlay
-    if (IsKeyPressed(KEY_N)) {
+    if (platformKeyPressed(SDL_SCANCODE_N)) {
         prefix_pending = false;
         help = HELP_NAV;
         return;
     }
     // leader h -> commands help overlay
-    if (IsKeyPressed(KEY_H)) {
+    if (platformKeyPressed(SDL_SCANCODE_H)) {
         prefix_pending = false;
         help = HELP_COMMANDS;
         return;
     }
     // any other printable key is an undefined chord: cancel
-    if (GetCharPressed() > 0) {
+    if (platformCharPressed() > 0) {
         prefix_pending = false;
         echo("Quit");
     }
 }
 
-static void drawMinibuffer(Font font, float char_w, float y, char *tmp, size_t tmp_cap) {
-    float fs = CFG_FONT_SIZE, sp = CFG_FONT_SPACING;
+static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
     if (mb_kind == MB_NONE) {
         if (prefix_pending) {
-            DrawTextEx(font, "Ctrlx2-", (Vector2){ CFG_MARGIN_X, y + 2 }, fs, sp, CFG_COLOR_FG);
+            drawStr("Ctrlx2-", char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
             return;
         }
         // echo area
-        if (echo_len > 0 && GetTime() - echo_time < 4.0) {
+        if (echo_len > 0 && platformTime() - echo_time < 4.0) {
             size_t n = echo_len < tmp_cap - 1 ? echo_len : tmp_cap - 1;
             memcpy(tmp, echo_buf, n);
             tmp[n] = 0;
-            DrawTextEx(font, tmp, (Vector2){ CFG_MARGIN_X, y + 2 }, fs, sp, CFG_COLOR_STATUS_FG);
+            drawStr(tmp, char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_STATUS_FG);
         }
         return;
     }
     if (mb_kind == MB_REPLACE_QUERY) {
         char buf[128];
         int n = snprintf(buf, sizeof(buf), "Replace? Enter=yes  n/p=skip  Esc=done  (%zu/%zu)", search_index + 1, match_count);
-        DrawTextEx(font, n > 0 ? buf : "Replace?", (Vector2){ CFG_MARGIN_X, y + 2 }, fs, sp, CFG_COLOR_FG);
+        drawStr(n > 0 ? buf : "Replace?", char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
         return;
     }
     // prompt
-    DrawTextEx(font, mb_prompt, (Vector2){ CFG_MARGIN_X, y + 2 }, fs, sp, CFG_COLOR_FG);
-    float prompt_w = MeasureTextEx(font, mb_prompt, fs, sp).x;
+    drawStr(mb_prompt, char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
+    float prompt_w = strWidth(mb_prompt, char_w);
     if (mb_kind == MB_TEXT_PROMPT) {
         size_t n = mb_len < tmp_cap - 1 ? mb_len : tmp_cap - 1;
         memcpy(tmp, mb_input, n);
         tmp[n] = 0;
         float x0 = CFG_MARGIN_X + prompt_w;
-        DrawTextEx(font, tmp, (Vector2){ x0, y + 2 }, fs, sp, CFG_COLOR_FG);
+        drawStr(tmp, char_w, x0, y + 2, CFG_COLOR_FG);
         // minibuffer caret (solid)
         float cx = x0 + (float)mb_cursor * char_w;
-        DrawRectangleV((Vector2){ cx, y + 2 }, (Vector2){ 2, CFG_FONT_SIZE }, CFG_COLOR_CURSOR);
+        platformDrawRect(cx, y + 2, 2, CFG_FONT_SIZE, CFG_COLOR_CURSOR);
         // search / replace-pattern prompt: show the live match count after query
         if ((mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM) && mb_len > 0) {
             char st[64];
@@ -1888,7 +1837,7 @@ static void drawMinibuffer(Font font, float char_w, float y, char *tmp, size_t t
             else if (match_count == 0) snprintf(st, sizeof(st), "(no match)");
             else snprintf(st, sizeof(st), "(%zu/%zu%s)", search_index + 1, match_count, match_truncated ? "+" : "");
             float sx = x0 + (float)mb_len * char_w + 2 * char_w;
-            DrawTextEx(font, st, (Vector2){ sx, y + 2 }, fs, sp, CFG_COLOR_GUTTER);
+            drawStr(st, char_w, sx, y + 2, CFG_COLOR_GUTTER);
         }
         // command prompt: dim list of matching completions (Tab to fill in)
         if (mb_intent == MBI_COMMAND) {
@@ -1906,7 +1855,7 @@ static void drawMinibuffer(Font font, float char_w, float y, char *tmp, size_t t
             }
             hint[hl] = 0;
             float hx = x0 + (float)mb_len * char_w + 2 * char_w;
-            DrawTextEx(font, hint, (Vector2){ hx, y + 2 }, fs, sp, CFG_COLOR_GUTTER);
+            drawStr(hint, char_w, hx, y + 2, CFG_COLOR_GUTTER);
         }
     }
 }
@@ -1920,20 +1869,20 @@ static const char *modPrefix(Mod m) {
     }
 }
 static const char *keyLabel(int key) {
-    if (key == KEY_LEFT) return "Left";
-    if (key == KEY_RIGHT) return "Right";
-    if (key == KEY_UP) return "Up";
-    if (key == KEY_DOWN) return "Down";
-    if (key == KEY_HOME) return "Home";
-    if (key == KEY_END) return "End";
-    if (key == KEY_PAGE_UP) return "PgUp";
-    if (key == KEY_PAGE_DOWN) return "PgDn";
-    if (key == KEY_ENTER) return "Enter";
-    if (key == KEY_KP_ENTER) return "KpEnter";
-    if (key == KEY_TAB) return "Tab";
-    if (key == KEY_BACKSPACE) return "Backspace";
-    if (key == KEY_DELETE) return "Delete";
-    if (key == KEY_SPACE) return "Space";
+    if (key == SDL_SCANCODE_LEFT) return "Left";
+    if (key == SDL_SCANCODE_RIGHT) return "Right";
+    if (key == SDL_SCANCODE_UP) return "Up";
+    if (key == SDL_SCANCODE_DOWN) return "Down";
+    if (key == SDL_SCANCODE_HOME) return "Home";
+    if (key == SDL_SCANCODE_END) return "End";
+    if (key == SDL_SCANCODE_PAGEUP) return "PgUp";
+    if (key == SDL_SCANCODE_PAGEDOWN) return "PgDn";
+    if (key == SDL_SCANCODE_RETURN) return "Enter";
+    if (key == SDL_SCANCODE_KP_ENTER) return "KpEnter";
+    if (key == SDL_SCANCODE_TAB) return "Tab";
+    if (key == SDL_SCANCODE_BACKSPACE) return "Backspace";
+    if (key == SDL_SCANCODE_DELETE) return "Delete";
+    if (key == SDL_SCANCODE_SPACE) return "Space";
     return "";
 }
 // Human-readable chord like "C-S-Left" or "B" into buf; returns its length.
@@ -1948,8 +1897,8 @@ static size_t comboName(char *buf, int key, Mod mod) {
     if (named_len > 0) {
         memcpy(buf + n, named, named_len);
         n += named_len;
-    } else if (key >= 'A' && key <= 'Z') {
-        buf[n++] = (char)key;
+    } else if (key >= SDL_SCANCODE_A && key <= SDL_SCANCODE_Z) {
+        buf[n++] = (char)('A' + (key - SDL_SCANCODE_A));
     } else {
         buf[n++] = '?';
     }
@@ -1977,21 +1926,21 @@ static size_t navRowCount(void) {
 }
 // Emacs-style: the help grows upward from the echo/status area as a panel of
 // lines, rather than a full-screen overlay.
-static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap) {
+static void drawHelp(float char_w, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap) {
     float status_y = win_h - 2 * line_h; // top of the status line
     size_t content = (help == HELP_NAV) ? navRowCount() : (scriptCommandCount() + 1);
     float pad = line_h * 0.5f;
     float block_h = (float)(content + 2) * line_h + pad * 2;
     float top = status_y - block_h;
     if (top < 0) top = 0;
-    DrawRectangle(0, (int)top, (int)win_w, (int)(status_y - top), CFG_COLOR_STATUS_BG);
-    DrawRectangle(0, (int)top, (int)win_w, 1, CFG_COLOR_GUTTER);
+    platformDrawRect(0, top, win_w, status_y - top, CFG_COLOR_STATUS_BG);
+    platformDrawRect(0, top, win_w, 1, CFG_COLOR_GUTTER);
 
     float x = CFG_MARGIN_X + 8;
     float y = status_y - block_h + pad;
 
     if (help == HELP_NAV) {
-        DrawTextEx(font, "Navigation & editing keys  (Ctrlx2 n)", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_CURSOR);
+        drawStr("Navigation & editing keys  (Ctrlx2 n)", char_w, x, y, CFG_COLOR_CURSOR);
         y += line_h;
         size_t total = scriptTopBindingCount();
         const char *shown[ACTION_COUNT + 64];
@@ -2023,11 +1972,11 @@ static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tm
             }
             int n = snprintf(tmp, tmp_cap, "%-22.*s%s", (int)clen, cbuf, label);
             if (n < 0) continue;
-            DrawTextEx(font, tmp, (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_FG);
+            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
             y += line_h;
         }
     } else {
-        DrawTextEx(font, "Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_CURSOR);
+        drawStr("Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", char_w, x, y, CFG_COLOR_CURSOR);
         y += line_h;
         size_t command_count = scriptCommandCount();
         size_t leader_count = scriptLeaderBindingCount();
@@ -2046,13 +1995,13 @@ static void drawHelp(Font font, float line_h, float win_w, float win_h, char *tm
             }
             int n = snprintf(tmp, tmp_cap, "%-16s%s", name, chord);
             if (n < 0) continue;
-            DrawTextEx(font, tmp, (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_FG);
+            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
             y += line_h;
         }
-        DrawTextEx(font, "Ctrlx3 (triple-tap Ctrl) : type a command", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_GUTTER);
+        drawStr("Ctrlx3 (triple-tap Ctrl) : type a command", char_w, x, y, CFG_COLOR_GUTTER);
         y += line_h;
     }
-    DrawTextEx(font, "Press any key to close", (Vector2){ x, y }, CFG_FONT_SIZE, CFG_FONT_SPACING, CFG_COLOR_GUTTER);
+    drawStr("Press any key to close", char_w, x, y, CFG_COLOR_GUTTER);
 }
 
 // Floor a float to size_t, treating <= 0 as 0.
@@ -2069,63 +2018,9 @@ static size_t digitCount(size_t n) {
     return d;
 }
 
-static void buildFontCodepoints(void) {
-    static const int ranges[3][2] = {
-        { 0x20, 0x24F }, // Basic Latin, Latin-1 Supplement, Latin Extended-A & B
-        { 0x370, 0x3FF }, // Greek and Coptic
-        { 0x400, 0x4FF }, // Cyrillic
-    };
-    static const int extra[] = {
-        0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, // hyphens & dashes
-        0x2018, 0x2019, 0x201A, 0x201C, 0x201D, 0x201E, // curly quotes
-        0x2020, 0x2021, 0x2022, 0x2026,                 // dagger, double dagger, bullet, ellipsis
-        0x2030, 0x2039, 0x203A,                         // per mille, angle quotes
-        0x20AC, 0x2122,                                 // euro, trademark
-    };
-    // Permanently-unassigned Greek-block slots: no font has glyphs for these, so
-    // requesting them makes LoadFontData warn ("glyphs found: 972/981"). Skip them.
-    static const int skip[] = { 0x378, 0x379, 0x380, 0x381, 0x382, 0x383, 0x38B, 0x38D, 0x3A2 };
-    size_t n = 0;
-    for (size_t r = 0; r < 3; r++) {
-        for (int c = ranges[r][0]; c <= ranges[r][1]; c++) {
-            bool skipit = false;
-            for (size_t s = 0; s < sizeof(skip) / sizeof(skip[0]); s++) {
-                if (skip[s] == c) {
-                    skipit = true;
-                    break;
-                }
-            }
-            if (!skipit) font_codepoints[n++] = c;
-        }
-    }
-    for (size_t e = 0; e < sizeof(extra) / sizeof(extra[0]); e++) font_codepoints[n++] = extra[e];
-    font_codepoints_count = n;
-}
-
-// Build the shared atlas from UnifontEX at `size` px. We assemble it by hand
-// (rather than LoadFontFromMemory) so we can rasterize with FONT_BITMAP -- no
-// anti-aliasing -- and pair it with point filtering, keeping Unifont's pixels
-// crisp instead of blurred.
-static Font buildAtlasFont(int size) {
-    Font f = { 0 };
-    f.baseSize = size;
-    f.glyphPadding = 1;
-    int count = 0;
-    f.glyphs = LoadFontData(font_bytes, (int)font_bytes_len, size, font_codepoints, (int)font_codepoints_count, FONT_BITMAP, &count);
-    if (f.glyphs == NULL) return f;
-    f.glyphCount = count;
-    Rectangle *recs = NULL;
-    Image atlas = GenImageFontAtlas(f.glyphs, &recs, count, size, f.glyphPadding, 0);
-    f.recs = recs;
-    f.texture = LoadTextureFromImage(atlas);
-    UnloadImage(atlas);
-    SetTextureFilter(f.texture, TEXTURE_FILTER_POINT);
-    return f;
-}
-
 // Resolve UnifontExMono.ttf next to the running executable and read it whole
-// into a heap buffer kept for the program's lifetime (LoadFontData/glyphs.c
-// need the raw bytes, not a path).
+// into a heap buffer kept for the program's lifetime (glyphs.c's stb_truetype
+// rasterizer needs the raw bytes, not a path).
 static bool loadFontFile(void) {
     char exe_path[4096];
     ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -2186,6 +2081,10 @@ void editorSetCursor(size_t pos) {
 bool editorIsNavAction(Action action) { return isNavAction(action); }
 bool editorGetMarkActive(void) { return mark_active; }
 void editorSetSelExtend(bool extend) { sel_extend = extend; }
+void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
+    replaceRange(start, end, bytes, bytes_len);
+}
+size_t editorUndoDepth(void) { return CFG_UNDO_DEPTH; }
 
 int main(int argc, char **argv) {
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits
@@ -2194,30 +2093,20 @@ int main(int argc, char **argv) {
         fprintf(stderr, "te: cannot load UnifontExMono.ttf (expected next to the executable)\n");
         return 1;
     }
-    buildFontCodepoints();
 
-    // A window has to exist before the monitor can be queried, so open a
-    // hidden placeholder, size it to half the monitor's resolution, then
-    // reveal it -- the user never sees the placeholder size.
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIDDEN);
-    InitWindow(1, 1, CFG_WINDOW_TITLE);
-    int monitor = GetCurrentMonitor();
-    SetWindowSize(GetMonitorWidth(monitor) / 2, GetMonitorHeight(monitor) / 2);
-    ClearWindowState(FLAG_WINDOW_HIDDEN);
-    SetTargetFPS(CFG_TARGET_FPS);
-    SetExitKey(0); // ESC is "cancel", not "quit"
+    // platformInit opens a hidden placeholder window, sizes it to half the
+    // primary display, then reveals it -- the user never sees the
+    // placeholder size.
+    platformInit(CFG_WINDOW_TITLE, CFG_TARGET_FPS);
 
     float font_size = CFG_FONT_SIZE; // mutable: Ctrl +/- zooms it
-    float spacing = CFG_FONT_SPACING;
-    Font font = buildAtlasFont((int)font_size);
-    if (font.texture.id == 0) font = GetFontDefault();
-    glyphs_init(font_bytes, font_bytes_len, (int)font_size);
+    glyphs_init(font_bytes, font_bytes_len, (int)font_size, platformRenderer());
 
-    float char_w = MeasureTextEx(font, "M", font_size, spacing).x;
+    float char_w = glyphs_advance('M');
     float line_h = font_size + CFG_FONT_LINE_GAP;
     float margin_x = CFG_MARGIN_X;
     float margin_y = CFG_MARGIN_Y;
-    blink_base = GetTime();
+    blink_base = platformTime();
 
     // Loaded before the command-line file (if any) is opened, so an
     // init.pl hook(post_open, ...) also fires for it.
@@ -2250,26 +2139,27 @@ int main(int argc, char **argv) {
     size_t prev_cursor = 1; // force first ensure-visible
 
     while (running) {
-        shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-        bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+        platformPollEvents();
+        shift = platformKeyDown(SDL_SCANCODE_LSHIFT) || platformKeyDown(SDL_SCANCODE_RSHIFT);
+        bool ctrl = platformKeyDown(SDL_SCANCODE_LCTRL) || platformKeyDown(SDL_SCANCODE_RCTRL);
         if (swallow_char_frames > 0) {
             swallow_char_frames--;
-            while (GetCharPressed() != 0) {}
+            while (platformCharPressed() != 0) {}
         }
         // C-m toggles modal (command) mode: bare keys run the Ctrl-key actions
         // and typing is suppressed (see handleInput). Ignored while a minibuffer
         // prompt is open so 'm' types normally there; swallow the toggling key so
         // the bare 'm' that exits modal isn't inserted as text.
-        if (IsKeyPressed(KEY_M) && (ctrl || (modal && mb_kind == MB_NONE))) {
+        if (platformKeyPressed(SDL_SCANCODE_M) && (ctrl || (modal && mb_kind == MB_NONE))) {
             modal = !modal;
             echo(modal ? "Modal ON (m/Esc to exit)" : "Modal OFF");
-            while (GetCharPressed() != 0) {}
+            while (platformCharPressed() != 0) {}
             swallow_char_frames = 3;
         }
 
         // ---- layout metrics (two bottom lines reserved: status + minibuffer) ----
-        float win_w = (float)GetScreenWidth();
-        float win_h = (float)GetScreenHeight();
+        float win_w, win_h;
+        platformScreenSize(&win_w, &win_h);
         float status_y = win_h - 2 * line_h;
         float mb_y = win_h - line_h;
         size_t total_lines = lineCount();
@@ -2287,7 +2177,7 @@ int main(int argc, char **argv) {
 
         // ---- input ----
         if (help != HELP_NONE) {
-            if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) help = HELP_NONE;
+            if (platformAnyKeyPressed() || platformMouseLeftPressed()) help = HELP_NONE;
         } else if (mb_kind != MB_NONE) {
             handleMinibuffer(ctrl);
         } else {
@@ -2306,17 +2196,18 @@ int main(int argc, char **argv) {
             // same-key char event GLFW queues while the key is still physically
             // held (initial or OS auto-repeat) gets typed into the buffer
             // before the quit is ever noticed.
-            if (mb_kind == MB_NONE && (WindowShouldClose() || quit_requested)) {
+            if (mb_kind == MB_NONE && (platformWindowShouldClose() || quit_requested)) {
                 if (dirty) mbStartQuery(MBI_QUIT, "Save changes? (y) yes  (n) no  (c) cancel");
                 else running = false;
             }
         }
 
         // ---- Ctrl +/- : zoom the font in 16 px steps (multiples of 16 keep
-        // UnifontEX pixel-crisp). Rebuild the atlas and reset the glyph cache.
+        // UnifontEX pixel-crisp). Reset the glyph cache to re-rasterize at
+        // the new size.
         if (help == HELP_NONE && mb_kind == MB_NONE) {
-            bool zin = ctrl && (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD));
-            bool zout = ctrl && (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT));
+            bool zin = ctrl && (platformKeyPressed(SDL_SCANCODE_EQUALS) || platformKeyPressed(SDL_SCANCODE_KP_PLUS));
+            bool zout = ctrl && (platformKeyPressed(SDL_SCANCODE_MINUS) || platformKeyPressed(SDL_SCANCODE_KP_MINUS));
             if (zin || zout) {
                 float step = zin ? 16.0f : -16.0f;
                 float ns = font_size + step;
@@ -2324,11 +2215,9 @@ int main(int argc, char **argv) {
                 if (ns > 64) ns = 64;
                 if (ns != font_size) {
                     font_size = ns;
-                    UnloadFont(font);
-                    font = buildAtlasFont((int)font_size);
-                    char_w = MeasureTextEx(font, "M", font_size, spacing).x;
-                    line_h = font_size + CFG_FONT_LINE_GAP;
                     glyphs_reset((int)font_size);
+                    char_w = glyphs_advance('M');
+                    line_h = font_size + CFG_FONT_LINE_GAP;
                     echoFmt("Font %dpx", (int)font_size);
                 }
             }
@@ -2370,14 +2259,14 @@ int main(int argc, char **argv) {
         }
 
         // ---- draw ----
-        BeginDrawing();
-        ClearBackground(CFG_COLOR_BG);
+        platformBeginDrawing();
+        platformClearBackground(CFG_COLOR_BG);
 
         size_t sel_a = selMin();
         size_t sel_b = selMax();
         LineCol cp = cursorLineCol();
         bool blink_on = !CFG_CURSOR_BLINK ||
-                        fmod(GetTime() - blink_base, CFG_CURSOR_BLINK_PERIOD * 2) < CFG_CURSOR_BLINK_PERIOD;
+                        fmod(platformTime() - blink_base, CFG_CURSOR_BLINK_PERIOD * 2) < CFG_CURSOR_BLINK_PERIOD;
         bool show_caret = mb_kind == MB_NONE && blink_on;
 
         if (wrap) {
@@ -2407,11 +2296,11 @@ int main(int argc, char **argv) {
                     if (sel_b > sel_a) {
                         size_t a = clampz(sel_a, seg_s, seg_e);
                         size_t b = clampz(sel_b, seg_s, seg_e);
-                        if (b > a) DrawRectangle(
-                            (int)(text_x0 + (float)colsIn(seg_s, a) * char_w),
-                            (int)y,
-                            (int)((float)colsIn(a, b) * char_w),
-                            (int)line_h,
+                        if (b > a) platformDrawRect(
+                            text_x0 + (float)colsIn(seg_s, a) * char_w,
+                            y,
+                            (float)colsIn(a, b) * char_w,
+                            line_h,
                             CFG_COLOR_SELECTION);
                     }
 
@@ -2419,10 +2308,10 @@ int main(int argc, char **argv) {
                         int np = snprintf(num_tmp, sizeof(num_tmp), "%zu", li + 1);
                         size_t npu = np > 0 ? (size_t)np : 0;
                         float nx = margin_x + (float)(npu < digits ? digits - npu : 0) * char_w;
-                        DrawTextEx(font, num_tmp, (Vector2){ nx, y }, font_size, spacing, CFG_COLOR_GUTTER);
+                        drawStr(num_tmp, char_w, nx, y, CFG_COLOR_GUTTER);
                     }
 
-                    drawCells(font, char_w, font_size, spacing, text_x0, y, seg_s, seg_e, CFG_COLOR_FG);
+                    drawCells(char_w, text_x0, y, seg_s, seg_e, CFG_COLOR_FG);
                     row++;
                     seg++;
                 }
@@ -2434,7 +2323,7 @@ int main(int argc, char **argv) {
 
             if (show_caret && caret_y >= 0) {
                 float cx = text_x0 + (float)(cp.col % visible_cols) * char_w;
-                DrawRectangleV((Vector2){ cx, caret_y }, (Vector2){ 2, line_h }, CFG_COLOR_CURSOR);
+                platformDrawRect(cx, caret_y, 2, line_h, CFG_COLOR_CURSOR);
             }
         } else {
             size_t li = 0, s = 0;
@@ -2450,11 +2339,11 @@ int main(int argc, char **argv) {
                         if (b > a) {
                             size_t ca = satsub(colsIn(s, a), left_col);
                             size_t cb = satsub(colsIn(s, b), left_col);
-                            if (cb > ca) DrawRectangle(
-                                (int)(text_x0 + (float)ca * char_w),
-                                (int)y,
-                                (int)((float)(cb - ca) * char_w),
-                                (int)line_h,
+                            if (cb > ca) platformDrawRect(
+                                text_x0 + (float)ca * char_w,
+                                y,
+                                (float)(cb - ca) * char_w,
+                                line_h,
                                 CFG_COLOR_SELECTION);
                         }
                     }
@@ -2462,10 +2351,10 @@ int main(int argc, char **argv) {
                     int np = snprintf(num_tmp, sizeof(num_tmp), "%zu", li + 1);
                     size_t npu = np > 0 ? (size_t)np : 0;
                     float nx = margin_x + (float)(npu < digits ? digits - npu : 0) * char_w;
-                    DrawTextEx(font, num_tmp, (Vector2){ nx, y }, font_size, spacing, CFG_COLOR_GUTTER);
+                    drawStr(num_tmp, char_w, nx, y, CFG_COLOR_GUTTER);
 
                     size_t vis_start = byteAtCol(s, e, left_col);
-                    drawCells(font, char_w, font_size, spacing, text_x0, y, vis_start, e, CFG_COLOR_FG);
+                    drawCells(char_w, text_x0, y, vis_start, e, CFG_COLOR_FG);
                 }
                 li++;
                 if (e >= len) break;
@@ -2476,35 +2365,34 @@ int main(int argc, char **argv) {
                 size_t row = cp.line - top_line;
                 float cx = text_x0 + (float)(cp.col - left_col) * char_w;
                 float cy = margin_y + (float)row * line_h;
-                DrawRectangleV((Vector2){ cx, cy }, (Vector2){ 2, line_h }, CFG_COLOR_CURSOR);
+                platformDrawRect(cx, cy, 2, line_h, CFG_COLOR_CURSOR);
             }
         }
 
         // status (mode) line
-        DrawRectangle(0, (int)status_y, (int)win_w, (int)line_h, CFG_COLOR_STATUS_BG);
+        platformDrawRect(0, status_y, win_w, line_h, CFG_COLOR_STATUS_BG);
         int slen = snprintf(status_tmp, sizeof(status_tmp), "%s%s%s  |  Ln %zu, Col %zu  |  %zu bytes",
                              modal ? "[MODAL]  " : "", filename, dirty ? " *" : "", cp.line + 1, cp.col + 1, len);
-        DrawTextEx(font, slen > 0 ? status_tmp : "te", (Vector2){ margin_x, status_y + 2 }, font_size, spacing, CFG_COLOR_STATUS_FG);
+        drawStr(slen > 0 ? status_tmp : "te", char_w, margin_x, status_y + 2, CFG_COLOR_STATUS_FG);
 
-        drawMinibuffer(font, char_w, mb_y, line_tmp, sizeof(line_tmp));
+        drawMinibuffer(char_w, mb_y, line_tmp, sizeof(line_tmp));
 
-        if (help != HELP_NONE) drawHelp(font, line_h, win_w, win_h, line_tmp, sizeof(line_tmp));
+        if (help != HELP_NONE) drawHelp(char_w, line_h, win_w, win_h, line_tmp, sizeof(line_tmp));
 
-        EndDrawing();
         if (shot_left > 0) {
             shot_left--;
             if (shot_left == 0) {
-                TakeScreenshot(shot_path);
+                platformScreenshot(shot_path);
                 running = false;
             }
         }
+        platformEndDrawing();
     }
 
     scriptShutdown();
     freeHistory();
     glyphs_deinit();
-    UnloadFont(font);
-    CloseWindow();
+    platformShutdown();
     free(font_bytes);
     return 0;
 }

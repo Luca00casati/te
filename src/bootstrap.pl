@@ -1,6 +1,6 @@
 % The engine's own standard library, written in Prolog rather than C --
 % consulted once at prologCreate (see BOOTSTRAP_PL_SRC / bootstrap_pl.h,
-% generated from this file by nob.c). Most of these predicates don't need
+% generated from this file by the Makefile). Most of these predicates don't need
 % anything a native C function can do that an ordinary clause can't, so the
 % engine dogfeeds its own unification/backtracking instead of duplicating
 % that logic in C. between/3 is the one case where this isn't just a style
