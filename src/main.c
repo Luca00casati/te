@@ -1753,7 +1753,7 @@ static void handleInput(bool ctrl, Metrics m) {
             }
         }
     }
-    // Script-registered bindings (te.bind, from init.lua) get first look, so
+    // Script-registered bindings (key_binding/3, from init.pl) get first look, so
     // a user script can override a built-in; if none match, fall through to
     // the built-in BINDINGS table exactly as before.
     if (!scriptHandleKey(cmd, shift)) {
@@ -1837,7 +1837,7 @@ static void handlePrefix(bool ctrl) {
         echo("Quit");
         return;
     }
-    // Script-registered leader chords (te.bind_leader, from init.lua) get
+    // Script-registered leader chords (leader_binding/3, from init.pl) get
     // first look, so a user script can override a built-in chord or even the
     // help overlays below; if none match, fall through to the built-ins.
     if (scriptHandlePrefixKey(shift)) {
@@ -2191,7 +2191,7 @@ static bool loadFontFile(void) {
     return true;
 }
 
-// --- editor.h: the surface exposed to src/script.c (Lua integration) -----
+// --- editor.h: the surface exposed to src/script.c (Prolog integration) ---
 void editorRunAction(Action action) { runAction(action); }
 void editorApplyAction(Action action) { applyAction(action); }
 void editorEcho(const char *msg) { echo(msg); }
@@ -2237,7 +2237,7 @@ int main(int argc, char **argv) {
     blink_base = GetTime();
 
     // Loaded before the command-line file (if any) is opened, so an
-    // init.lua te.on("post-open", ...) hook also fires for it.
+    // init.pl hook(post_open, ...) also fires for it.
     scriptInit();
 
     // Arguments (parsed after window init so echo works): an optional file to

@@ -1,7 +1,9 @@
-// Lua integration -- see script.h. Registers a `te` table (te.action,
-// te.echo, te.insert, te.text, te.cursor, te.set_cursor, te.bind,
-// te.bind_leader, te.on) and loads it from an optional user init.lua at
-// startup.
+// Prolog integration -- see script.h. Registers `te_action/1`, `te_echo/1`,
+// `te_insert/1`, `te_text/1`, `te_cursor/1`, `te_set_cursor/1` as native
+// predicates, and loads an optional user init.pl at startup. Bindings/hooks
+// are ordinary facts and rules (key_binding/3, leader_binding/3, hook/2),
+// re-solved fresh every time they're checked rather than cached from a
+// one-time registration -- see prolog.h's engine and docs/init.pl.example.
 #include "script.h"
 
 #include <ctype.h>
@@ -9,63 +11,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <lua.h>
-#include <lauxlib.h>
-#include <lualib.h>
-
 #include "raylib.h"
 #include "binding.h"
 #include "editor.h"
+#include "prolog.h"
 
-static lua_State *L = NULL;
+static Prolog *pl = NULL;
 
-// A key bound via te.bind()/te.bind_leader(): either an existing named
-// action (looked up in COMMANDS, same as a typed command) or a Lua function
-// held in the registry.
-typedef enum { SB_ACTION, SB_FUNCTION } ScriptBindingKind;
-typedef struct {
-    int key;
-    Mod mod;
-    ScriptBindingKind kind;
-    Action action;   // when kind == SB_ACTION
-    int fn_ref;      // when kind == SB_FUNCTION (LUA_REGISTRYINDEX ref)
-} ScriptBinding;
+// Set right before solving a matched key_binding/leader_binding/hook
+// Handler, so te_action/1 knows whether to run the action repeat-count
+// aware (a top-level key, like a typed key) or exactly once (a leader
+// chord or a lifecycle hook) -- mirrors editorRunAction vs editorApplyAction
+// in the old Lua integration.
+static bool currentAllowsRepeat = false;
 
-typedef struct {
-    ScriptBinding *items;
-    size_t count, cap;
-} ScriptBindingList;
-
-// Mirrors the C side's two tables: top_bindings parallels BINDINGS (checked
-// in handleInput), leader_bindings parallels PREFIX_BINDINGS (checked in
-// handlePrefix, once the leader is armed).
-static ScriptBindingList top_bindings = { 0 };
-static ScriptBindingList leader_bindings = { 0 };
-
-static void addBinding(ScriptBindingList *list, ScriptBinding sb) {
-    if (list->count == list->cap) {
-        list->cap = list->cap ? list->cap * 2 : 8;
-        list->items = realloc(list->items, list->cap * sizeof(ScriptBinding));
-    }
-    list->items[list->count++] = sb;
-}
-
-// A function registered via te.on(event, fn). Several handlers can share an
-// event name; scriptRunHook calls all of them, in registration order.
-typedef struct {
-    char event[32];
-    int fn_ref;
-} Hook;
-static Hook *hooks = NULL;
-static size_t hooks_count = 0;
-static size_t hooks_cap = 0;
-
-static void reportError(const char *prefix) {
-    const char *msg = lua_tostring(L, -1);
-    char buf[512];
-    snprintf(buf, sizeof buf, "%s: %s", prefix, msg ? msg : "unknown error");
+static void reportError(const char *msg, void *ctx) {
+    (void)ctx;
+    char buf[560];
+    snprintf(buf, sizeof buf, "prolog error: %s", msg);
     editorEcho(buf);
-    lua_pop(L, 1);
 }
 
 // Single-char names map directly: raylib's KEY_A..KEY_Z and KEY_ZERO..
@@ -78,242 +42,178 @@ static const size_t NAMED_KEYS_COUNT = sizeof(NAMED_KEYS) / sizeof(NAMED_KEYS[0]
 
 static int parseKeyName(const char *name) {
     if (strlen(name) == 1) return toupper((unsigned char)name[0]);
-    for (size_t i = 0; i < NAMED_KEYS_COUNT; i++) {
+    for (size_t i = 0; i < NAMED_KEYS_COUNT; i++)
         if (strcmp(name, NAMED_KEYS[i].name) == 0) return NAMED_KEYS[i].key;
-    }
     return -1;
 }
-
+// "ctrl_shift" (underscore): a bare Prolog atom can't contain a hyphen.
 static bool parseModName(const char *name, Mod *out) {
     if (strcmp(name, "any") == 0) { *out = MOD_ANY; return true; }
     if (strcmp(name, "ctrl") == 0) { *out = MOD_CTRL; return true; }
-    if (strcmp(name, "ctrl-shift") == 0) { *out = MOD_CTRL_SHIFT; return true; }
+    if (strcmp(name, "ctrl_shift") == 0) { *out = MOD_CTRL_SHIFT; return true; }
     return false;
 }
-
 static bool lookupAction(const char *name, Action *out) {
     for (size_t i = 0; i < COMMANDS_COUNT; i++) {
-        if (strcmp(COMMANDS[i].name, name) == 0) {
-            *out = COMMANDS[i].action;
-            return true;
-        }
+        if (strcmp(COMMANDS[i].name, name) == 0) { *out = COMMANDS[i].action; return true; }
     }
     return false;
 }
 
-// --- te.* API ---------------------------------------------------------
+// --- te_* native predicates ------------------------------------------------
 
-static int l_action(lua_State *l) {
-    const char *name = luaL_checkstring(l, 1);
+static bool nTeAction(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *name; size_t len;
+    if (!prologGetText(p, args[0], &name, &len)) return false;
+    char buf[64]; size_t n = len < 63 ? len : 63;
+    memcpy(buf, name, n); buf[n] = 0;
     Action action;
-    if (!lookupAction(name, &action)) return luaL_error(l, "unknown action '%s'", name);
-    editorRunAction(action);
-    return 0;
+    if (!lookupAction(buf, &action)) prologThrowMsg(p, "te_action: unknown action");
+    if (currentAllowsRepeat) editorRunAction(action); else editorApplyAction(action);
+    return true;
 }
-
-static int l_echo(lua_State *l) {
-    editorEcho(luaL_checkstring(l, 1));
-    return 0;
+static bool nTeEcho(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *s; size_t len;
+    if (!prologGetText(p, args[0], &s, &len)) return false;
+    char buf[512]; size_t n = len < sizeof buf - 1 ? len : sizeof buf - 1;
+    memcpy(buf, s, n); buf[n] = 0;
+    editorEcho(buf);
+    return true;
 }
-
-static int l_insert(lua_State *l) {
-    size_t n;
-    const char *s = luaL_checklstring(l, 1, &n);
-    editorInsertText((const unsigned char *)s, n);
-    return 0;
+static bool nTeInsert(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *s; size_t len;
+    if (!prologGetText(p, args[0], &s, &len)) return false;
+    editorInsertText((const unsigned char *)s, len);
+    return true;
 }
-
-static int l_text(lua_State *l) {
+static bool nTeText(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
     size_t n;
     const unsigned char *s = editorGetText(&n);
-    lua_pushlstring(l, (const char *)s, n);
-    return 1;
+    PlTerm *t = prologMkString(p, (const char *)s, n);
+    return prologUnify(p, args[0], t);
 }
-
-static int l_cursor(lua_State *l) {
-    lua_pushinteger(l, (lua_Integer)editorGetCursor());
-    return 1;
+static bool nTeCursor(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorGetCursor()));
 }
-
-static int l_set_cursor(lua_State *l) {
-    lua_Integer pos = luaL_checkinteger(l, 1);
+static bool nTeSetCursor(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long pos;
+    if (!prologGetInt(p, args[0], &pos)) return false;
     if (pos < 0) pos = 0;
     editorSetCursor((size_t)pos);
-    return 0;
+    return true;
 }
 
-// Shared arg parsing for te.bind/te.bind_leader: (key_name, mod_name,
-// action_name_or_function) at stack slots 1-3. Errors longjmp out via
-// luaL_error, so a caller only sees this return once it has succeeded.
-static ScriptBinding parseBindArgs(lua_State *l, const char *fn_name) {
-    const char *key_name = luaL_checkstring(l, 1);
-    const char *mod_name = luaL_checkstring(l, 2);
-    luaL_checkany(l, 3);
-
-    int key = parseKeyName(key_name);
-    if (key < 0) luaL_error(l, "%s: unknown key '%s'", fn_name, key_name);
-    Mod mod;
-    if (!parseModName(mod_name, &mod)) luaL_error(l, "%s: unknown mods '%s'", fn_name, mod_name);
-
-    ScriptBinding sb = { .key = key, .mod = mod };
-    if (lua_isstring(l, 3)) {
-        if (!lookupAction(lua_tostring(l, 3), &sb.action)) {
-            luaL_error(l, "%s: unknown action '%s'", fn_name, lua_tostring(l, 3));
-        }
-        sb.kind = SB_ACTION;
-    } else if (lua_isfunction(l, 3)) {
-        lua_pushvalue(l, 3);
-        sb.kind = SB_FUNCTION;
-        sb.fn_ref = luaL_ref(l, LUA_REGISTRYINDEX);
-    } else {
-        luaL_error(l, "%s: handler must be an action name or a function", fn_name);
-    }
-    return sb;
-}
-
-static int l_bind(lua_State *l) {
-    addBinding(&top_bindings, parseBindArgs(l, "te.bind"));
-    return 0;
-}
-
-static int l_bind_leader(lua_State *l) {
-    addBinding(&leader_bindings, parseBindArgs(l, "te.bind_leader"));
-    return 0;
-}
-
-static int l_on(lua_State *l) {
-    const char *event = luaL_checkstring(l, 1);
-    luaL_checktype(l, 2, LUA_TFUNCTION);
-    if (strlen(event) >= sizeof(((Hook *)0)->event)) {
-        return luaL_error(l, "te.on: event name '%s' is too long", event);
-    }
-
-    lua_pushvalue(l, 2);
-    int ref = luaL_ref(l, LUA_REGISTRYINDEX);
-    if (hooks_count == hooks_cap) {
-        hooks_cap = hooks_cap ? hooks_cap * 2 : 8;
-        hooks = realloc(hooks, hooks_cap * sizeof(Hook));
-    }
-    Hook *h = &hooks[hooks_count++];
-    strncpy(h->event, event, sizeof(h->event) - 1);
-    h->event[sizeof(h->event) - 1] = 0;
-    h->fn_ref = ref;
-    return 0;
-}
-
-static const luaL_Reg TE_FUNCS[] = {
-    { "action", l_action },
-    { "echo", l_echo },
-    { "insert", l_insert },
-    { "text", l_text },
-    { "cursor", l_cursor },
-    { "set_cursor", l_set_cursor },
-    { "bind", l_bind },
-    { "bind_leader", l_bind_leader },
-    { "on", l_on },
-    { NULL, NULL },
-};
-
-// --- lifecycle ----------------------------------------------------------
+// --- lifecycle --------------------------------------------------------
 
 static void scriptSetup(void) {
-    L = luaL_newstate();
-    if (!L) return;
-    luaL_openlibs(L);
-    luaL_newlib(L, TE_FUNCS);
-    lua_setglobal(L, "te");
-}
-
-static void scriptLoadFile(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return; // no init file -- not an error, same as a missing .emacs
-    fclose(f);
-    if (luaL_dofile(L, path) != LUA_OK) reportError("lua error");
+    pl = prologCreate();
+    prologSetErrorHandler(pl, reportError, NULL);
+    prologRegisterNative(pl, "te_action", 1, nTeAction, NULL);
+    prologRegisterNative(pl, "te_echo", 1, nTeEcho, NULL);
+    prologRegisterNative(pl, "te_insert", 1, nTeInsert, NULL);
+    prologRegisterNative(pl, "te_text", 1, nTeText, NULL);
+    prologRegisterNative(pl, "te_cursor", 1, nTeCursor, NULL);
+    prologRegisterNative(pl, "te_set_cursor", 1, nTeSetCursor, NULL);
 }
 
 void scriptInit(void) {
     scriptSetup();
-    if (!L) return;
-
     char path[4096];
     const char *xdg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
-    if (xdg && xdg[0]) snprintf(path, sizeof path, "%s/te/init.lua", xdg);
-    else if (home && home[0]) snprintf(path, sizeof path, "%s/.config/te/init.lua", home);
+    if (xdg && xdg[0]) snprintf(path, sizeof path, "%s/te/init.pl", xdg);
+    else if (home && home[0]) snprintf(path, sizeof path, "%s/.config/te/init.pl", home);
     else return;
-
-    scriptLoadFile(path);
+    prologConsultFile(pl, path);
 }
-
 void scriptInitFromFile(const char *path) {
     scriptSetup();
-    if (!L) return;
-    scriptLoadFile(path);
+    prologConsultFile(pl, path);
 }
-
-static void freeBindingList(ScriptBindingList *list) {
-    free(list->items);
-    *list = (ScriptBindingList){ 0 };
-}
-
 void scriptShutdown(void) {
-    if (L) {
-        lua_close(L);
-        L = NULL;
+    if (pl) { prologDestroy(pl); pl = NULL; }
+}
+
+// --- key/hook dispatch --------------------------------------------------
+// key_binding/3 and leader_binding/3 are solved fresh every call (via
+// findall) rather than cached, so a Handler rule can consult live editor
+// state (te_text/1 etc.) -- see prolog.h's design note on this.
+
+static bool matchAndRun(const char *predName, bool (*modMatches)(Mod, bool, bool),
+                         bool cmd, bool shift, bool repeatable, bool (*keyPressed)(int key)) {
+    if (!pl) return false;
+    size_t mark = prologMark(pl);
+    char goalSrc[128];
+    snprintf(goalSrc, sizeof goalSrc, "findall(b(K,M,H), %s(K,M,H), L)", predName);
+    PlTerm *g = prologParseTerm(pl, goalSrc);
+    bool matched = false;
+    if (g && prologSolve(pl, g)) {
+        PlTerm *list = prologArg(pl, g, 3);
+        while (list && prologIsList(pl, list)) {
+            PlTerm *item, *tail;
+            prologGetListHeadTail(pl, list, &item, &tail);
+            list = tail;
+            const char *kName, *mName; size_t kLen, mLen;
+            if (!prologGetText(pl, prologArg(pl, item, 1), &kName, &kLen)) continue;
+            if (!prologGetText(pl, prologArg(pl, item, 2), &mName, &mLen)) continue;
+            char kBuf[32], mBuf[32];
+            size_t kn = kLen < 31 ? kLen : 31, mn = mLen < 31 ? mLen : 31;
+            memcpy(kBuf, kName, kn); kBuf[kn] = 0;
+            memcpy(mBuf, mName, mn); mBuf[mn] = 0;
+            int key = parseKeyName(kBuf);
+            Mod mod;
+            if (key < 0 || !parseModName(mBuf, &mod)) continue;
+            if (!modMatches(mod, cmd, shift)) continue;
+            if (!keyPressed(key)) continue;
+            PlTerm *handler = prologArg(pl, item, 3);
+            currentAllowsRepeat = repeatable;
+            prologSolve(pl, handler);
+            matched = true;
+            break;
+        }
     }
-    freeBindingList(&top_bindings);
-    freeBindingList(&leader_bindings);
-    free(hooks);
-    hooks = NULL;
-    hooks_count = 0;
-    hooks_cap = 0;
+    prologReset(pl, mark);
+    return matched;
+}
+static bool topKeyPressed(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
+static bool prefixKeyPressed(int key) { return IsKeyPressed(key); }
+// Adapts modMatchesChord's (Mod,bool shift) signature to matchAndRun's
+// (Mod,bool cmd,bool shift) callback shape -- Ctrl is irrelevant/optional
+// for a chord, only shift narrows it (see binding.h).
+static bool modMatchesChordAdapter(Mod mod, bool cmd, bool shift) { (void)cmd; return modMatchesChord(mod, shift); }
+
+bool scriptHandleKey(bool cmd, bool shift) {
+    return matchAndRun("key_binding", modMatchesKey, cmd, shift, /*repeatable=*/true, topKeyPressed);
+}
+bool scriptHandlePrefixKey(bool shift) {
+    return matchAndRun("leader_binding", modMatchesChordAdapter, /*cmd=*/false, shift, /*repeatable=*/false, prefixKeyPressed);
 }
 
 void scriptRunHook(const char *name) {
-    if (!L) return;
-    for (size_t i = 0; i < hooks_count; i++) {
-        if (strcmp(hooks[i].event, name) != 0) continue;
-        lua_rawgeti(L, LUA_REGISTRYINDEX, hooks[i].fn_ref);
-        if (lua_pcall(L, 0, 0, 0) != LUA_OK) reportError("lua error");
-    }
-}
+    if (!pl) return;
+    char atomName[64]; size_t n = 0;
+    for (const char *s = name; *s && n < sizeof atomName - 1; s++) atomName[n++] = (*s == '-') ? '_' : *s;
+    atomName[n] = 0;
 
-// Runs a matched binding's handler: an action via `apply` (editorRunAction
-// for a top-level key so repeat-count applies, editorApplyAction for a
-// leader chord so it fires exactly once, matching the native tables), or a
-// Lua function via pcall, with any error echoed rather than fatal.
-static void invokeBinding(const ScriptBinding *b, void (*apply)(Action)) {
-    if (b->kind == SB_ACTION) {
-        apply(b->action);
-    } else {
-        lua_rawgeti(L, LUA_REGISTRYINDEX, b->fn_ref);
-        if (lua_pcall(L, 0, 0, 0) != LUA_OK) reportError("lua error");
+    size_t mark = prologMark(pl);
+    char goalSrc[128];
+    snprintf(goalSrc, sizeof goalSrc, "findall(H, hook(%s, H), L)", atomName);
+    PlTerm *g = prologParseTerm(pl, goalSrc);
+    if (g && prologSolve(pl, g)) {
+        PlTerm *list = prologArg(pl, g, 3);
+        while (list && prologIsList(pl, list)) {
+            PlTerm *handler, *tail;
+            prologGetListHeadTail(pl, list, &handler, &tail);
+            list = tail;
+            currentAllowsRepeat = false;
+            prologSolve(pl, handler);
+        }
     }
-}
-
-bool scriptHandleKey(bool cmd, bool shift) {
-    if (!L) return false;
-    for (size_t i = 0; i < top_bindings.count; i++) {
-        ScriptBinding *b = &top_bindings.items[i];
-        if (!modMatchesKey(b->mod, cmd, shift)) continue;
-        if (!(IsKeyPressed(b->key) || IsKeyPressedRepeat(b->key))) continue;
-        invokeBinding(b, editorRunAction);
-        return true;
-    }
-    return false;
-}
-
-// Mirrors PREFIX_BINDINGS matching in handlePrefix: Ctrl is optional (a
-// chord fires whether or not Ctrl is still held down), only Shift narrows
-// MOD_CTRL/MOD_CTRL_SHIFT, and a chord never auto-repeats.
-bool scriptHandlePrefixKey(bool shift) {
-    if (!L) return false;
-    for (size_t i = 0; i < leader_bindings.count; i++) {
-        ScriptBinding *b = &leader_bindings.items[i];
-        if (!modMatchesChord(b->mod, shift)) continue;
-        if (!IsKeyPressed(b->key)) continue;
-        invokeBinding(b, editorApplyAction);
-        return true;
-    }
-    return false;
+    prologReset(pl, mark);
 }

@@ -3,9 +3,9 @@
 A minimal GUI text editor, currently built and tested on **Linux** (the code
 is portable C11, so other platforms are mainly a matter of adding their link
 steps to `nob.c`). Single window, monospace grid, load/edit/save a plain-text
-file. Built with [raylib](https://www.raylib.com/), PCRE2, and Lua (all
-linked from the system install), using
-[nob](https://github.com/tsoding/nob.h) as the build system.
+file. Built with [raylib](https://www.raylib.com/) and PCRE2 (both linked
+from the system install), plus a small from-scratch Prolog engine for
+scripting, using [nob](https://github.com/tsoding/nob.h) as the build system.
 
 Text is rendered with **[UnifontEX](https://github.com/stgiga/UnifontEX)** — a
 single font covering every Unicode plane — so Latin, Greek, Cyrillic, CJK,
@@ -114,29 +114,45 @@ cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
 
 ## Scripting
 
-`te` loads an optional Lua init script at startup —
-`$XDG_CONFIG_HOME/te/init.lua`, falling back to `~/.config/te/init.lua` —
-the way Emacs loads `.emacs` or Vim loads `init.vim`. A missing file is fine
-(te just uses its `src/binding.h` defaults); a script error is echoed on the
+`te` loads an optional Prolog init script at startup —
+`$XDG_CONFIG_HOME/te/init.pl`, falling back to `~/.config/te/init.pl` — the
+way Emacs loads `.emacs` or Vim loads `init.vim`. A missing file is fine (te
+just uses its `src/binding.h` defaults); a script error is echoed on the
 status line instead of stopping `te` from starting. See
-`docs/init.lua.example` for a starting point.
+`docs/init.pl.example` for a starting point.
 
-| Lua | Does |
+Bindings and hooks are plain **facts and rules**, re-checked fresh every time
+they're needed rather than registered once as an opaque callback — so a
+clause can be a rule whose body consults live editor state, not just a fixed
+action:
+
+| Predicate | Does |
 | --- | --- |
-| `te.action(name)` | Run a named command (anything in `COMMANDS`, `src/binding.h`) |
-| `te.echo(msg)` | Write a message to the status line |
-| `te.insert(text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
-| `te.text()` | The whole buffer, as a string |
-| `te.cursor()` / `te.set_cursor(pos)` | Get/set the cursor as a byte offset |
-| `te.bind(key, mods, handler)` | Bind a top-level key to a Lua function or an existing action name |
-| `te.bind_leader(key, mods, handler)` | Same, but as a leader chord (after the double-Ctrl-tap leader) |
-| `te.on(event, fn)` | Run `fn` whenever `event` fires: `"post-save"` or `"post-open"` |
+| `key_binding(Key, Mod, Handler)` | Bind a top-level key to any goal, or an existing action via `te_action(Name)` |
+| `leader_binding(Key, Mod, Handler)` | Same, but as a leader chord (after the double-Ctrl-tap leader) |
+| `hook(Event, Handler)` | Run `Handler` whenever `Event` fires: `post_save` or `post_open` |
+| `te_action(Name)` | Run a named command (anything in `COMMANDS`, `src/binding.h`) |
+| `te_echo(Msg)` | Write a message to the status line |
+| `te_insert(Text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
+| `te_text(Text)` | Unify `Text` with the whole buffer |
+| `te_cursor(Pos)` / `te_set_cursor(Pos)` | Get/set the cursor as a byte offset |
 
-`key` is a single-character string (`"s"`, `"3"`) or one of `space`, `enter`,
-`tab`, `backspace`, `delete`, `escape`. `mods` is `any`, `ctrl`, or
-`ctrl-shift`. Script bindings are checked before the built-in `BINDINGS`/
-`PREFIX_BINDINGS` tables, so they can override a default; a Lua error inside
-a bound function is echoed rather than crashing `te`.
+`Key` is a single-character atom (`g`, `3`) or one of `space`, `enter`,
+`tab`, `backspace`, `delete`, `escape`. `Mod` is `any`, `ctrl`, or
+`ctrl_shift` (underscore, not hyphen — a bare Prolog atom can't hold one).
+`Handler` is any goal — a custom predicate, or a direct `te_action(Name)`
+call (action names like `"select-all"` have a hyphen, so pass them as a
+quoted string or atom rather than bare). Script bindings are checked before
+the built-in `BINDINGS`/`PREFIX_BINDINGS` tables, so they can override a
+default; an uncaught error inside a handler is echoed rather than crashing
+`te`.
+
+The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch Prolog**,
+not a wrapper around an external library: facts/rules, unification,
+backtracking, cut (`!`), if-then-else, arithmetic, `catch/3`/`throw/1`,
+`assert`/`retract`, `findall/3`, and a practical-subset parser with a fixed
+infix operator table (no user-defined `op/3`) — enough for real config logic,
+not full ISO Prolog.
 
 ## Dependencies
 
@@ -147,9 +163,6 @@ Linux, X11/OpenGL. Install:
   distro's dev packages if it has them — e.g. `libpcre2-dev` on
   Debian/Ubuntu). `nob.c` links them as plain `-lraylib -lpcre2-8`; if yours
   land somewhere nonstandard, add the matching `-I`/`-L` flags there.
-- **Lua 5.4** — `liblua5.4-dev` on Debian/Ubuntu (`sudo apt install
-  liblua5.4-dev`). `nob.c` compiles against `/usr/include/lua5.4` and links
-  `-llua5.4`; adjust both if your distro installs Lua elsewhere.
 - The system libraries raylib's static archive needs at link time:
   ```sh
   sudo apt install \
@@ -181,8 +194,8 @@ would go to support macOS/Windows.
 Two suites, both under `tests/`:
 
 - **`unit_te.c`** — white-box tests of the buffer/undo/search/UTF-8 logic,
-  plus the Lua `te.*` API (`tests/fixtures/init_test*.lua`). Since everything
-  in `main.c` is `static` with no header, it `#include`s `src/main.c`
+  plus the Prolog scripting API (`tests/fixtures/init_test*.pl`). Since
+  everything in `main.c` is `static` with no header, it `#include`s `src/main.c`
   directly (with `main()` renamed out of the way) to reach those functions;
   nothing here opens a window.
 - **`cli_te.c`** — black-box tests that run the compiled `te` binary as a
@@ -211,18 +224,22 @@ Two suites, both under `tests/`:
 - `src/binding.h` — the key → action map. The leader is armed by a double-tap
   of Ctrl (`detectCtrlTaps` in `main.c`); edit `BINDINGS`/`PREFIX_BINDINGS`/
   `COMMANDS` to rebind.
-- `src/script.c` — the Lua integration (see Scripting above). `src/editor.h`
-  is the small explicit surface `main.c` exposes to it (run an action, echo,
-  insert text, read/move the cursor) so script.c never reaches into
-  `main.c`'s static state directly; `handleInput`/`handlePrefix` in `main.c`
-  check script-registered bindings before the built-in `BINDINGS`/
-  `PREFIX_BINDINGS` tables, and `saveFile`/`openPath` call `scriptRunHook`
-  for `te.on` listeners.
-- `nob.c` compiles `src/main.c`, `src/glyphs.c`, and `src/script.c` with
-  `cc -std=c11` and links against the system-installed raylib, libpcre2-8,
-  and liblua5.4 (plain `-lraylib -lpcre2-8 -llua5.4`), plus the Linux desktop
-  system libraries raylib's GLFW backend needs, into `./te` in the project
-  root.
+- `src/prolog.c`/`prolog.h` — the from-scratch Prolog engine (see Scripting
+  above): tokenizer, operator-precedence parser, term representation,
+  unification, a backtracking CPS solver with cut/catch/throw, and a small
+  built-in predicate library. Not editor-specific — doesn't know `te` exists.
+- `src/script.c` — the Prolog integration (registers `te_*` native
+  predicates, loads `init.pl`). `src/editor.h` is the small explicit surface
+  `main.c` exposes to it (run an action, echo, insert text, read/move the
+  cursor) so script.c never reaches into `main.c`'s static state directly;
+  `handleInput`/`handlePrefix` in `main.c` check script-registered bindings
+  before the built-in `BINDINGS`/`PREFIX_BINDINGS` tables, and
+  `saveFile`/`openPath` call `scriptRunHook` for `hook/2` listeners.
+- `nob.c` compiles `src/main.c`, `src/glyphs.c`, `src/script.c`, and
+  `src/prolog.c` with `cc -std=c11` and links against the system-installed
+  raylib and libpcre2-8 (plain `-lraylib -lpcre2-8`; the Prolog engine adds no
+  external dependency), plus the Linux desktop system libraries raylib's
+  GLFW backend needs, into `./te` in the project root.
 - **Regex search** uses PCRE2's 8-bit API directly (`#define
   PCRE2_CODE_UNIT_WIDTH 8` + `#include <pcre2.h>`), linked from the system
   install — no vendored copy.
@@ -235,7 +252,6 @@ Third-party components keep their own licenses:
 
 - **raylib** (linked from the system install) — zlib/libpng license.
 - **PCRE2** (linked from the system install) — BSD license.
-- **Lua** (linked from the system install) — MIT license.
 - **UnifontEX** (bundled as `UnifontExMono.ttf`) — derived from GNU Unifont;
   distributed under the SIL Open Font License 1.1 and the GNU GPLv2 with the
   font-embedding exception.

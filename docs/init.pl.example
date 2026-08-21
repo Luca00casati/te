@@ -1,0 +1,61 @@
+% Example te init.pl. Copy to $XDG_CONFIG_HOME/te/init.pl (or
+% ~/.config/te/init.pl) and edit -- it's loaded automatically at startup.
+% A missing file is fine (te just uses its built-in defaults); a script
+% error is echoed on the status line instead of stopping te from starting.
+%
+% Bindings and hooks are plain facts/rules, re-checked fresh every time
+% they're needed (not registered once as an opaque callback) -- so a
+% key_binding/leader_binding/hook clause can be a rule whose body consults
+% live editor state via te_text/1 etc., not just a fixed action.
+
+% key_binding(Key, Mod, Handler): Key is a single-character atom (g, 3) or
+% one of space/enter/tab/backspace/delete/escape. Mod is any, ctrl, or
+% ctrl_shift (underscore, not hyphen -- a bare Prolog atom can't contain one).
+% Handler is any goal; te_action(Name) runs a named command from
+% src/binding.h's COMMANDS table (as a quoted string, since those names have
+% hyphens a bare atom can't hold), same as typing it at the leader prompt.
+key_binding(g, ctrl_shift, te_action("select-all")).
+
+% Handler can also point at a plain existing action directly, as a shortcut
+% for a one-clause rule. Note: this overrides a matching built-in from
+% src/binding.h if one exists at the same key/mod -- script bindings are
+% always checked first.
+key_binding(t, ctrl_shift, te_action("toggle-wrap")).
+
+% A custom handler predicate can read/write the buffer directly: te_text/1
+% (the whole buffer), te_cursor/1 / te_set_cursor/1 (byte offset), and
+% te_insert/1 (inserts at the cursor -- or replaces the selection -- through
+% the same path as typing, so undo/redo just work).
+key_binding(d, ctrl_shift, insert_date).
+insert_date :-
+    get_time(T),
+    format_time(Date, "%Y-%m-%d", T),
+    te_insert(Date).
+
+% A handler can inspect the buffer before deciding what to do -- here, warn
+% instead of saving past a size limit.
+key_binding(y, ctrl_shift, save_unless_too_big).
+save_unless_too_big :-
+    te_text(Text),
+    string_length(Text, Len),
+    (   Len > 100000
+    ->  te_echo("buffer is getting big")
+    ;   te_action(save)
+    ).
+
+% leader_binding/3 is the same idea for leader chords (leader = double-tap
+% Ctrl, per the README): "leader d" inserts today's date.
+leader_binding(d, any, insert_date).
+
+% hook(Event, Handler) reacts to editor events instead of a keypress.
+% Current events: post_save (after a successful save, any of save/save-as/
+% save-on-quit) and post_open (after a file is loaded, including the one
+% given on the command line).
+hook(post_save, announce_save).
+announce_save :-
+    get_time(T),
+    format_time(Now, "%H:%M:%S", T),
+    string_concat("saved at ", Now, Msg),
+    te_echo(Msg).
+
+:- te_echo("init.pl loaded").

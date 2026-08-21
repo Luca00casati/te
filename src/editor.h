@@ -1,4 +1,4 @@
-// The surface main.c exposes to src/script.c (the Lua integration), so
+// The surface main.c exposes to src/script.c (the Prolog integration), so
 // scripts can run built-in actions and touch the buffer without script.c
 // reaching into main.c's static state directly.
 #ifndef TE_EDITOR_H

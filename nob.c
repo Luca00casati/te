@@ -30,9 +30,7 @@ static bool compile_object(const char *src, const char *obj, const char **extra_
     nob_log(NOB_INFO, "compiling %s", obj);
     Nob_Cmd cmd = { 0 };
     nob_cc(&cmd);
-    // -I/usr/include/lua5.4: liblua5.4-dev installs headers in a versioned
-    // subdir, not on the default include path (per `pkg-config --cflags lua5.4`).
-    nob_cmd_append(&cmd, "-std=c11", "-Wall", "-Wextra", "-I/usr/include/lua5.4", "-c", src);
+    nob_cmd_append(&cmd, "-std=c11", "-Wall", "-Wextra", "-c", src);
     nob_cc_output(&cmd, obj);
     return nob_cmd_run_sync_and_reset(&cmd);
 }
@@ -43,13 +41,16 @@ static bool build_te(void) {
     const char *glyphs_deps[] = { "src/glyphs.h" };
     if (!compile_object("src/glyphs.c", "build/glyphs.o", glyphs_deps, NOB_ARRAY_LEN(glyphs_deps))) return false;
 
-    const char *script_deps[] = { "src/script.h", "src/editor.h", "src/binding.h" };
+    const char *prolog_deps[] = { "src/prolog.h" };
+    if (!compile_object("src/prolog.c", "build/prolog.o", prolog_deps, NOB_ARRAY_LEN(prolog_deps))) return false;
+
+    const char *script_deps[] = { "src/script.h", "src/editor.h", "src/binding.h", "src/prolog.h" };
     if (!compile_object("src/script.c", "build/script.o", script_deps, NOB_ARRAY_LEN(script_deps))) return false;
 
     const char *main_deps[] = { "src/config.h", "src/binding.h", "src/glyphs.h", "src/editor.h", "src/script.h" };
     if (!compile_object("src/main.c", "build/main.o", main_deps, NOB_ARRAY_LEN(main_deps))) return false;
 
-    const char *objs[] = { "build/main.o", "build/glyphs.o", "build/script.o" };
+    const char *objs[] = { "build/main.o", "build/glyphs.o", "build/script.o", "build/prolog.o" };
     int rebuild = nob_needs_rebuild("te", objs, NOB_ARRAY_LEN(objs));
     if (rebuild < 0) return false;
     if (!rebuild) return true;
@@ -57,7 +58,7 @@ static bool build_te(void) {
     nob_log(NOB_INFO, "linking te");
     Nob_Cmd cmd = { 0 };
     nob_cc(&cmd);
-    nob_cmd_append(&cmd, "build/main.o", "build/glyphs.o", "build/script.o", "-lraylib", "-lpcre2-8", "-llua5.4");
+    nob_cmd_append(&cmd, "build/main.o", "build/glyphs.o", "build/script.o", "build/prolog.o", "-lraylib", "-lpcre2-8");
     append_raylib_system_libs(&cmd);
     nob_cc_output(&cmd, "te");
     return nob_cmd_run_sync_and_reset(&cmd);
@@ -70,13 +71,16 @@ static bool build_te(void) {
 static bool build_unit_test(void) {
     if (!nob_mkdir_if_not_exists("build")) return false;
 
-    const char *script_deps[] = { "src/script.h", "src/editor.h", "src/binding.h" };
+    const char *prolog_deps[] = { "src/prolog.h" };
+    if (!compile_object("src/prolog.c", "build/prolog.o", prolog_deps, NOB_ARRAY_LEN(prolog_deps))) return false;
+
+    const char *script_deps[] = { "src/script.h", "src/editor.h", "src/binding.h", "src/prolog.h" };
     if (!compile_object("src/script.c", "build/script.o", script_deps, NOB_ARRAY_LEN(script_deps))) return false;
 
     const char *deps[] = { "src/main.c", "src/config.h", "src/binding.h", "src/glyphs.h", "src/editor.h", "src/script.h" };
     if (!compile_object("tests/unit_te.c", "build/unit_te.o", deps, NOB_ARRAY_LEN(deps))) return false;
 
-    const char *objs[] = { "build/unit_te.o", "build/glyphs.o", "build/script.o" };
+    const char *objs[] = { "build/unit_te.o", "build/glyphs.o", "build/script.o", "build/prolog.o" };
     int rebuild = nob_needs_rebuild("build/unit_te", objs, NOB_ARRAY_LEN(objs));
     if (rebuild < 0) return false;
     if (!rebuild) return true;
@@ -84,7 +88,7 @@ static bool build_unit_test(void) {
     nob_log(NOB_INFO, "linking build/unit_te");
     Nob_Cmd cmd = { 0 };
     nob_cc(&cmd);
-    nob_cmd_append(&cmd, "build/unit_te.o", "build/glyphs.o", "build/script.o", "-lraylib", "-lpcre2-8", "-llua5.4");
+    nob_cmd_append(&cmd, "build/unit_te.o", "build/glyphs.o", "build/script.o", "build/prolog.o", "-lraylib", "-lpcre2-8");
     append_raylib_system_libs(&cmd);
     nob_cc_output(&cmd, "build/unit_te");
     return nob_cmd_run_sync_and_reset(&cmd);
