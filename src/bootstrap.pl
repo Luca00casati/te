@@ -106,3 +106,20 @@ exclude(G, [X|Xs], Result) :-
 
 foldl(_, [], Acc, Acc).
 foldl(G, [X|Xs], Acc0, Acc) :- call(G, X, Acc0, Acc1), foldl(G, Xs, Acc1, Acc).
+
+% --- database ------------------------------------------------------------
+
+% retract/1 (native) is a single C call, not a backtrackable generator --
+% unlike some ISO systems, retrying it on backtrack does NOT retract the
+% next matching clause, so the textbook `retract(X), fail` loop only ever
+% removes one. It also leaves a successful match's bindings on X in place
+% (needed for an ordinary retract(foo(V)) caller to read V back), which
+% would corrupt a general pattern like foo(_) for a second attempt anyway.
+% `\+ \+ retract(X)` sidesteps both: the double negation keeps the removal
+% (assert/retract aren't trailed, so backtracking never undoes them) but
+% discards any bindings retract(X) made, so X is exactly as general on the
+% next recursive call as it was on this one. Safe when nothing matches at
+% all (retract just fails, same as "no match" -- falls through to the base
+% clause below).
+retractall(X) :- \+ \+ retract(X), !, retractall(X).
+retractall(_).

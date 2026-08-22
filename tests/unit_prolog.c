@@ -34,6 +34,27 @@ static bool solveText(Prolog *pl, const char *src) {
     return ok;
 }
 
+// Regression test for src/bootstrap.pl's retractall/1: the textbook
+// `retract(X), fail` loop doesn't work in this engine (retract/1 is a
+// single-shot native, not a backtrackable generator, and a successful match
+// leaves bindings on X that would corrupt a general pattern on any further
+// attempt) -- confirmed by hand before landing the `\+ \+ retract(X)` fix
+// (that version only ever removed one clause of a multi-clause predicate).
+static void test_retractall(void) {
+    Prolog *pl = prologCreate();
+    prologSetErrorHandler(pl, onError, NULL);
+    prologConsultFile(pl, "src/bootstrap.pl");
+    CHECK(solveText(pl, "assertz(foo(1))"));
+    CHECK(solveText(pl, "assertz(foo(2))"));
+    CHECK(solveText(pl, "assertz(foo(3))"));
+    CHECK(solveText(pl, "assertz(bar(x))"));
+    CHECK(solveText(pl, "retractall(foo(_))"));
+    CHECK(!solveText(pl, "foo(_)"));  // every foo/1 clause is gone
+    CHECK(solveText(pl, "bar(x)"));   // unrelated predicate untouched
+    CHECK(solveText(pl, "retractall(nonexistent(_))")); // no error on an empty predicate
+    prologDestroy(pl);
+}
+
 static void test_assert_retract_roundtrip(void) {
     Prolog *pl = prologCreate();
     prologSetErrorHandler(pl, onError, NULL);
@@ -134,6 +155,7 @@ static void test_index_preserves_assertion_order(void) {
 }
 
 int main(void) {
+    RUN(test_retractall);
     RUN(test_assert_retract_roundtrip);
     RUN(test_retract_does_not_leak_program_arena);
     RUN(test_index_preserves_assertion_order);
