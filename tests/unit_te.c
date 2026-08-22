@@ -472,6 +472,99 @@ static void test_read_missing_file(void) {
     CHECK(len == 0); // readFileInto resets len on failure
 }
 
+// --- multi-buffer (main.c's Buffer/Window, src/buffers.pl) ---------------
+// Structural round-trip: create a second buffer, switch the (one, so far)
+// window to it, then kill it and confirm the window falls back to the
+// original -- the native layer src/buffers.pl's switch_buffer/kill_buffer
+// will wrap once the window/buffer natives get UI wiring.
+static void test_buffer_create_switch_kill(void) {
+    int b1 = editorCurrentBufferId();
+    int b2 = editorBufferCreate();
+    CHECK(b2 != b1);
+    CHECK(editorBufferCount() == 2);
+
+    int win = editorSelectedWindowId();
+    CHECK(editorWindowBufferId(win) == b1);
+    CHECK(editorWindowSetBuffer(win, b2));
+    CHECK(editorWindowBufferId(win) == b2);
+    CHECK(editorCurrentBufferId() == b2);
+
+    CHECK(editorBufferKill(b2)); // last window showing it falls back to b1
+    CHECK(editorBufferCount() == 1);
+    CHECK(editorCurrentBufferId() == b1);
+    CHECK(!editorBufferKill(b2)); // already gone
+}
+
+// Two live buffers must never see each other's content, dirty flag, or
+// undo history -- the whole point of moving undo/search state to
+// buffer-local variables (src/buffers.pl) rather than global facts.
+static void test_buffer_isolation(void) {
+    setText("one");
+    int b1 = editorCurrentBufferId();
+    int win = editorSelectedWindowId();
+
+    int b2 = editorBufferCreate();
+    CHECK(editorWindowSetBuffer(win, b2));
+    CHECK(textEquals("")); // switching to a fresh buffer starts empty
+    insertBytes((const unsigned char *)"two", 3);
+    CHECK(textEquals("two"));
+    bool d2 = false;
+    CHECK(editorBufferDirty(b2, &d2) && d2);
+
+    doUndo(); // b2's own undo
+    CHECK(textEquals(""));
+
+    CHECK(editorWindowSetBuffer(win, b1));
+    CHECK(textEquals("one")); // b1's content untouched by anything done to b2
+    bool d1 = true;
+    CHECK(editorBufferDirty(b1, &d1) && !d1); // setText() left b1 clean
+
+    CHECK(editorBufferKill(b2));
+}
+
+static void test_buffer_properties(void) {
+    int b1 = editorCurrentBufferId();
+    bool d;
+    CHECK(editorBufferDirty(b1, &d) && d == dirty); // matches the selected buffer's own flag
+    const char *name = editorBufferName(b1);
+    CHECK(name != NULL && strlen(name) > 0);
+    const char *path;
+    bool hasFile;
+    CHECK(editorBufferFilename(b1, &path, &hasFile));
+    // Unknown id: every query fails cleanly rather than reading freed/absent memory.
+    CHECK(editorBufferName(999999) == NULL);
+    CHECK(!editorBufferFilename(999999, &path, &hasFile));
+    CHECK(!editorBufferDirty(999999, &d));
+}
+
+static void test_buffer_open_file_and_find_by_path(void) {
+    char path[] = "/tmp/te_unit_test_buf_open_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    close(fd);
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    static const char content[] = "opened via editorBufferOpenFile\n";
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
+
+    int origBuf = editorCurrentBufferId();
+    int newId = editorBufferOpenFile(path);
+    CHECK(newId != origBuf);
+    CHECK(editorCurrentBufferId() == origBuf); // doesn't disturb what's on screen
+
+    int win = editorSelectedWindowId();
+    CHECK(editorWindowSetBuffer(win, newId));
+    CHECK(textEquals("opened via editorBufferOpenFile\n"));
+
+    CHECK(editorBufferFindByPath(path) == newId);
+    CHECK(editorBufferFindByPath("/tmp/te_unit_test_no_such_buffer_path") == -1);
+
+    CHECK(editorWindowSetBuffer(win, origBuf));
+    CHECK(editorBufferKill(newId));
+    unlink(path);
+}
+
 // --- Prolog scripting (src/script.c) -------------------------------------
 static void test_script_loads_and_runs_api(void) {
     reset();
@@ -572,6 +665,11 @@ int main(void) {
 
     RUN(test_save_and_read_roundtrip);
     RUN(test_read_missing_file);
+
+    RUN(test_buffer_create_switch_kill);
+    RUN(test_buffer_isolation);
+    RUN(test_buffer_properties);
+    RUN(test_buffer_open_file_and_find_by_path);
 
     scriptShutdown(); // the script-specific tests below set up their own engine each
     RUN(test_script_loads_and_runs_api);

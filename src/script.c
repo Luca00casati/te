@@ -383,6 +383,109 @@ static bool nTeCurrentBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     return prologUnify(p, args[0], prologMkInt(p, (long)editorCurrentBufferId()));
 }
+static bool nTeBufferCreate(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorBufferCreate()));
+}
+// Copies a Prolog text argument into a NUL-terminated C buffer -- shared by
+// every native below that takes a path, since prologGetText's result isn't
+// guaranteed NUL-terminated for the code-list case (matches nTeAction's own
+// pattern for its action-name argument).
+static bool textToCStr(Prolog *p, PlTerm *t, char *out, size_t outCap) {
+    const char *s; size_t slen;
+    if (!prologGetText(p, t, &s, &slen)) return false;
+    size_t n = slen < outCap - 1 ? slen : outCap - 1;
+    memcpy(out, s, n);
+    out[n] = 0;
+    return true;
+}
+static bool nTeBufferOpenFile(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    char path[4096];
+    if (!textToCStr(p, args[0], path, sizeof path)) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)editorBufferOpenFile(path)));
+}
+static bool nTeBufferFindByPath(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    char path[4096];
+    if (!textToCStr(p, args[0], path, sizeof path)) return false;
+    int id = editorBufferFindByPath(path);
+    if (id < 0) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)id));
+}
+static bool nTeBufferKill(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    return editorBufferKill((int)id);
+}
+static bool nTeBufferList(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t count = editorBufferCount();
+    PlTerm *list = prologMkAtom(p, "[]");
+    for (size_t i = count; i > 0; i--) {
+        PlTerm *cargs[2] = { prologMkInt(p, (long)editorBufferIdAt(i - 1)), list };
+        list = prologMkCompound(p, ".", 2, cargs);
+    }
+    return prologUnify(p, args[0], list);
+}
+static bool nTeBufferName(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    const char *name = editorBufferName((int)id);
+    if (!name) return false;
+    return prologUnify(p, args[1], prologMkCodeList(p, name, strlen(name)));
+}
+static bool nTeBufferFilename(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    const char *path; bool hasFile;
+    if (!editorBufferFilename((int)id, &path, &hasFile)) return false;
+    PlTerm *result = hasFile ? prologMkCodeList(p, path, strlen(path)) : prologMkAtom(p, "false");
+    return prologUnify(p, args[1], result);
+}
+static bool nTeBufferDirty(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    bool dirty;
+    if (!editorBufferDirty((int)id, &dirty)) return false;
+    return prologUnify(p, args[1], prologMkAtom(p, dirty ? "true" : "false"));
+}
+static bool nTeBufferSave(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    return editorBufferSave((int)id);
+}
+
+// --- windows (src/windows.pl) -----------------------------------------------
+static bool nTeSelectedWindow(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorSelectedWindowId()));
+}
+static bool nTeSelectWindow(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    return editorSelectWindow((int)id);
+}
+static bool nTeWindowBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long winId;
+    if (!prologGetInt(p, args[0], &winId)) return false;
+    int bufId = editorWindowBufferId((int)winId);
+    if (bufId < 0) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)bufId));
+}
+static bool nTeWindowSetBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long winId, bufId;
+    if (!prologGetInt(p, args[0], &winId) || !prologGetInt(p, args[1], &bufId)) return false;
+    return editorWindowSetBuffer((int)winId, (int)bufId);
+}
 
 // --- lifecycle --------------------------------------------------------
 
@@ -476,6 +579,19 @@ static bool scriptSetup(void) {
     prologRegisterNative(pl, "te_clipboard_get", 1, nTeClipboardGet, NULL);
     prologRegisterNative(pl, "te_copy_range", 2, nTeCopyRange, NULL);
     prologRegisterNative(pl, "te_current_buffer", 1, nTeCurrentBuffer, NULL);
+    prologRegisterNative(pl, "te_buffer_create", 1, nTeBufferCreate, NULL);
+    prologRegisterNative(pl, "te_buffer_open_file", 2, nTeBufferOpenFile, NULL);
+    prologRegisterNative(pl, "te_buffer_find_by_path", 2, nTeBufferFindByPath, NULL);
+    prologRegisterNative(pl, "te_buffer_kill", 1, nTeBufferKill, NULL);
+    prologRegisterNative(pl, "te_buffer_list", 1, nTeBufferList, NULL);
+    prologRegisterNative(pl, "te_buffer_name", 2, nTeBufferName, NULL);
+    prologRegisterNative(pl, "te_buffer_filename", 2, nTeBufferFilename, NULL);
+    prologRegisterNative(pl, "te_buffer_dirty", 2, nTeBufferDirty, NULL);
+    prologRegisterNative(pl, "te_buffer_save", 1, nTeBufferSave, NULL);
+    prologRegisterNative(pl, "te_selected_window", 1, nTeSelectedWindow, NULL);
+    prologRegisterNative(pl, "te_select_window", 1, nTeSelectWindow, NULL);
+    prologRegisterNative(pl, "te_window_buffer", 2, nTeWindowBuffer, NULL);
+    prologRegisterNative(pl, "te_window_set_buffer", 2, nTeWindowSetBuffer, NULL);
 
     if (!resolvePlDir(plDir, sizeof plDir)) return false;
     char bootstrapPath[4160];

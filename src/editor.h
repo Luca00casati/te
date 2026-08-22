@@ -140,8 +140,38 @@ size_t editorBufferLen(void);
 // --- buffers (src/buffers.pl) ----------------------------------------------
 // The selected window's buffer's id -- stable for the buffer's lifetime,
 // Prolog-facing identity for buffer-local variables (src/buffers.pl's
-// blocal_get/2, blocal_set/2) and, once buffer create/switch/kill land as
-// native predicates, everything else that needs to name a specific buffer.
+// blocal_get/2, blocal_set/2) and everything below that needs to name a
+// specific buffer.
 int editorCurrentBufferId(void);
+
+// Structural buffer operations -- memory-safety-bearing (create/free a
+// Buffer, keep every Window's `buf` pointer valid), so these stay native
+// rather than Prolog; src/buffers.pl is the policy on top (switch_buffer/1,
+// open_file/1's reuse-if-already-open, next_buffer/0, kill_buffer/1).
+int editorBufferCreate(void); // a blank scratch buffer, no file
+// Reads `path` into a *new* buffer (like the old single-buffer openPath: a
+// missing file is fine, becomes an empty new-file buffer, not an error)
+// without touching whatever's currently on screen. Returns the new id.
+int editorBufferOpenFile(const char *path);
+// The id of a live buffer already showing `path`, or -1 if none does.
+int editorBufferFindByPath(const char *path);
+// Frees the buffer, repointing any window that showed it (auto-creating a
+// fresh scratch buffer if it was the last one). False if `id` isn't live.
+bool editorBufferKill(int id);
+size_t editorBufferCount(void);
+int editorBufferIdAt(size_t index); // 0-based, creation order; -1 out of range
+const char *editorBufferName(int id); // NULL if `id` isn't live
+bool editorBufferFilename(int id, const char **out_path, bool *out_has_file);
+bool editorBufferDirty(int id, bool *out);
+bool editorBufferSave(int id);
+
+// --- windows (src/windows.pl) -----------------------------------------------
+// Only the addressing surface switch_buffer/1 needs exists yet (there's
+// only ever one window, root_window, until a later commit adds real
+// splitting) -- split/close/list/delete-others land alongside that.
+int editorSelectedWindowId(void);
+bool editorSelectWindow(int id);
+int editorWindowBufferId(int win_id);
+bool editorWindowSetBuffer(int win_id, int buf_id);
 
 #endif // TE_EDITOR_H

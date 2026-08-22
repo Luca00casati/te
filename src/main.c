@@ -99,6 +99,7 @@ typedef struct Window {
 } Window;
 
 static Buffer *buffer_list = NULL;
+static Buffer *buffer_list_tail = NULL; // so bufferCreate can append in O(1), keeping the list in creation order
 static Window *root_window = NULL;
 static Window *selected_window = NULL; // receives keys; the caret blinks here
 static int next_buffer_id = 1;
@@ -134,9 +135,15 @@ static Buffer *bufferCreate(void) {
     b->buf_filename_buf[0] = 0;
     b->buf_filename = "untitled.txt";
     b->buf_has_file = false;
-    b->next = buffer_list;
-    buffer_list = b;
+    b->next = NULL;
+    if (buffer_list_tail) buffer_list_tail->next = b; else buffer_list = b;
+    buffer_list_tail = b;
     return b;
+}
+static Buffer *bufferFindById(int id) {
+    for (Buffer *b = buffer_list; b; b = b->next)
+        if (b->id == id) return b;
+    return NULL;
 }
 static Window *windowCreateLeaf(Buffer *buf) {
     Window *w = malloc(sizeof(Window));
@@ -1883,6 +1890,127 @@ size_t editorViewCols(void) { return view_cols; }
 size_t editorPageLines(void) { return page_lines; }
 size_t editorBufferLen(void) { return len; }
 int editorCurrentBufferId(void) { return selected_window->buf->id; }
+
+// A window's own id -- today there's only ever root_window (a lone leaf),
+// so this is a trivial lookup; once splitting lands this needs a real tree
+// walk over leaves (a split node has no buffer of its own to switch and no
+// meaningful "select" target).
+static Window *windowFindById(int id) {
+    return (root_window && root_window->id == id) ? root_window : NULL;
+}
+
+int editorBufferCreate(void) { return bufferCreate()->id; }
+// Populates a *new* buffer from `path` (openPath's existing open-or-new-file
+// logic, reused verbatim) without disturbing whatever's currently on
+// screen -- temporarily points the selected window at the new buffer so
+// openPath's macro-based text/len/filename/... writes land on it, restores
+// the previous buffer before returning. Whether/when to actually switch to
+// it is a policy decision left to the caller (src/buffers.pl's open_file/1).
+int editorBufferOpenFile(const char *path) {
+    Buffer *b = bufferCreate();
+    Buffer *saved = selected_window->buf;
+    selected_window->buf = b;
+    openPath(path);
+    selected_window->buf = saved;
+    return b->id;
+}
+int editorBufferFindByPath(const char *path) {
+    for (Buffer *b = buffer_list; b; b = b->next)
+        if (b->buf_has_file && strcmp(b->buf_filename, path) == 0) return b->id;
+    return -1;
+}
+// Repoints any window currently showing the killed buffer -- today that's
+// only ever selected_window (no other windows exist yet; the window-split
+// commit will need to walk the whole tree here). Auto-creates a fresh
+// scratch buffer if this was the last one, so there's always at least one.
+bool editorBufferKill(int id) {
+    Buffer *target = bufferFindById(id);
+    if (!target) return false;
+    Buffer *prev = NULL;
+    for (Buffer *b = buffer_list; b; prev = b, b = b->next)
+        if (b == target) break;
+    if (prev) prev->next = target->next; else buffer_list = target->next;
+    if (buffer_list_tail == target) buffer_list_tail = prev;
+    if (selected_window->buf == target) {
+        selected_window->buf = buffer_list ? buffer_list : bufferCreate();
+        cursor = 0; anchor = 0; top_line = 0; left_col = 0;
+    }
+    free(target->buf_text);
+    free(target);
+    return true;
+}
+size_t editorBufferCount(void) {
+    size_t n = 0;
+    for (Buffer *b = buffer_list; b; b = b->next) n++;
+    return n;
+}
+// 0-based, creation order (bufferCreate appends).
+int editorBufferIdAt(size_t index) {
+    size_t i = 0;
+    for (Buffer *b = buffer_list; b; b = b->next, i++)
+        if (i == index) return b->id;
+    return -1;
+}
+// Display name: the filename's basename, or the literal "untitled.txt"
+// default for a buffer never associated with a real path -- derived on
+// demand rather than stored, since it's always exactly this computation.
+const char *editorBufferName(int id) {
+    Buffer *b = bufferFindById(id);
+    if (!b) return NULL;
+    const char *slash = strrchr(b->buf_filename, '/');
+    return slash ? slash + 1 : b->buf_filename;
+}
+bool editorBufferFilename(int id, const char **out_path, bool *out_has_file) {
+    Buffer *b = bufferFindById(id);
+    if (!b) return false;
+    *out_path = b->buf_filename;
+    *out_has_file = b->buf_has_file;
+    return true;
+}
+bool editorBufferDirty(int id, bool *out) {
+    Buffer *b = bufferFindById(id);
+    if (!b) return false;
+    *out = b->buf_dirty;
+    return true;
+}
+// saveFile() operates on selected_window->buf via the macros -- temporarily
+// point the selected window at the target buffer (whether or not it's the
+// one currently on screen) so an arbitrary buffer can be saved by id.
+bool editorBufferSave(int id) {
+    Buffer *b = bufferFindById(id);
+    if (!b) return false;
+    Buffer *saved = selected_window->buf;
+    selected_window->buf = b;
+    bool ok = saveFile();
+    selected_window->buf = saved;
+    return ok;
+}
+
+int editorSelectedWindowId(void) { return selected_window->id; }
+bool editorSelectWindow(int id) {
+    Window *w = windowFindById(id);
+    if (!w) return false;
+    selected_window = w;
+    return true;
+}
+int editorWindowBufferId(int win_id) {
+    Window *w = windowFindById(win_id);
+    return w ? w->buf->id : -1;
+}
+// Switches `win_id`'s buffer and resets that window's own view state (a
+// fresh buffer means the old scroll position/cursor are meaningless) --
+// does not touch which window is selected.
+bool editorWindowSetBuffer(int win_id, int buf_id) {
+    Window *w = windowFindById(win_id);
+    Buffer *b = bufferFindById(buf_id);
+    if (!w || !b) return false;
+    w->buf = b;
+    w->win_cursor = 0;
+    w->win_anchor = 0;
+    w->win_top_line = 0;
+    w->win_left_col = 0;
+    return true;
+}
 
 int main(int argc, char **argv) {
     bootstrapEditor(); // must run before anything touches the buffer/window macros
