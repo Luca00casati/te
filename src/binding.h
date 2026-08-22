@@ -72,6 +72,10 @@ typedef enum {
     ACTION_OTHER_WINDOW,          // cycle focus to the next pane
     ACTION_DELETE_WINDOW,         // close the selected pane (not its buffer)
     ACTION_DELETE_OTHER_WINDOWS,  // collapse to just the selected pane
+    // misc
+    ACTION_TOGGLE_MODAL,          // C-m: bare keys become their Ctrl-chord, typing suppressed
+    ACTION_TOGGLE_MARK,           // C-Space: arm the mark: movement then extends the selection
+    ACTION_RELOAD_CONFIG,         // re-consult init.pl + scripts/config.pl, re-apply cfg/2
     ACTION_COUNT,
 } Action;
 
@@ -178,6 +182,9 @@ static const Command COMMANDS[] = {
     { "other-window", ACTION_OTHER_WINDOW },
     { "delete-window", ACTION_DELETE_WINDOW },
     { "delete-other-windows", ACTION_DELETE_OTHER_WINDOWS },
+    { "toggle-modal", ACTION_TOGGLE_MODAL },
+    { "toggle-mark", ACTION_TOGGLE_MARK },
+    { "reload-config", ACTION_RELOAD_CONFIG },
 };
 static const size_t COMMANDS_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
 
@@ -240,6 +247,9 @@ static const char *const ACTION_LABELS[ACTION_COUNT] = {
     [ACTION_OTHER_WINDOW] = "other window",
     [ACTION_DELETE_WINDOW] = "delete window",
     [ACTION_DELETE_OTHER_WINDOWS] = "delete other windows",
+    [ACTION_TOGGLE_MODAL] = "toggle modal",
+    [ACTION_TOGGLE_MARK] = "toggle mark",
+    [ACTION_RELOAD_CONFIG] = "reload config",
 };
 
 #endif // TE_BINDING_H

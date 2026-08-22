@@ -740,22 +740,54 @@ static void consultDefaultsAndConfig(void) {
     snprintf(cfgPath, sizeof cfgPath, "%s/config.pl", plDir);
     prologConsultFile(pl, cfgPath);
 }
-bool scriptInit(void) {
-    if (!scriptSetup()) return false;
-    char path[4096];
+// The init.pl path this engine was last started (or reloaded) with -- saved
+// so scriptReloadConfig can reconsult the same file without re-deriving the
+// XDG path (scriptInitFromFile's caller-given path also lands here, so
+// reload works the same way for tests).
+static char initPath[4096] = "";
+static void resolveInitPath(char *out, size_t outsz) {
     const char *xdg = getenv("XDG_CONFIG_HOME");
     const char *home = getenv("HOME");
-    if (xdg && xdg[0]) snprintf(path, sizeof path, "%s/te/init.pl", xdg);
-    else if (home && home[0]) snprintf(path, sizeof path, "%s/.config/te/init.pl", home);
-    else path[0] = 0;
-    if (path[0]) prologConsultFile(pl, path);
+    if (xdg && xdg[0]) snprintf(out, outsz, "%s/te/init.pl", xdg);
+    else if (home && home[0]) snprintf(out, outsz, "%s/.config/te/init.pl", home);
+    else out[0] = 0;
+}
+bool scriptInit(void) {
+    if (!scriptSetup()) return false;
+    resolveInitPath(initPath, sizeof initPath);
+    if (initPath[0]) prologConsultFile(pl, initPath);
     consultDefaultsAndConfig();
     return true;
 }
 bool scriptInitFromFile(const char *path) {
     if (!scriptSetup()) return false;
+    snprintf(initPath, sizeof initPath, "%s", path);
     prologConsultFile(pl, path);
     consultDefaultsAndConfig();
+    return true;
+}
+// Re-applies startup configuration without restarting the whole engine, for
+// the `reload-config` action: clears every cfg/2 fact first (otherwise a
+// value that changed on disk would still lose to the stale one asserted at
+// startup -- first-assertion-wins would keep finding that one), then
+// reconsults the same init.pl this engine started with -- so a cfg/2
+// override there is re-applied too, at the cost of re-running everything
+// else in init.pl a second time (harmless duplicate key_binding/etc. facts;
+// a non-idempotent `:-` directive there, if any, does fire again) --
+// followed by scripts/config.pl for the defaults. The caller (main.c's
+// ACTION_RELOAD_CONFIG) still has to call loadConfig() afterward to pull
+// the freshly reconsulted facts into its own C globals; this only updates
+// the live Prolog database.
+bool scriptReloadConfig(void) {
+    if (!pl) return false;
+    size_t mark = prologMark(pl);
+    PlTerm *g = prologParseTerm(pl, "retractall(cfg(_, _))");
+    if (g) prologSolve(pl, g);
+    prologReset(pl, mark);
+    if (initPath[0]) prologConsultFile(pl, initPath);
+    char cfgPath[4160];
+    snprintf(cfgPath, sizeof cfgPath, "%s/config.pl", plDir);
+    prologConsultFile(pl, cfgPath);
     return true;
 }
 void scriptShutdown(void) {

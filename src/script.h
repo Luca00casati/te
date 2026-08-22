@@ -48,6 +48,15 @@ bool scriptCfgText(const char *key, char *out, size_t outsz);
 // to 255 when the fact is rgb/3.
 bool scriptCfgColor(const char *key, unsigned char *r, unsigned char *g, unsigned char *b, unsigned char *a);
 
+// Reloads config without restarting: clears every cfg/2 fact, then
+// reconsults the init.pl this engine was started with, then
+// scripts/config.pl -- see script.c for the "why clear first" and "init.pl
+// runs again too" caveats. The caller must still call its own equivalent
+// of loadConfig() afterward to re-read the (possibly changed) cfg/2 facts
+// into its own globals; this only updates the live Prolog database.
+// Returns false only if there's no engine running at all.
+bool scriptReloadConfig(void);
+
 // Solves key_binding(Key, Mod, Handler) (auto-repeat while held) and, if
 // nothing matched, key_binding_once(Key, Mod, Handler) (fires once per
 // press) fresh against this frame's input -- re-deriving the match every

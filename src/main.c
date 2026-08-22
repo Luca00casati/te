@@ -39,6 +39,8 @@ static int cfg_scroll_speed = 3;
 static bool cfg_cursor_blink = true;
 static double cfg_cursor_blink_period = 0.5;
 static size_t cfg_undo_depth = 4096;
+static int cfg_leader_taps = 2;  // consecutive clean Ctrl taps that arm the leader
+static int cfg_command_taps = 3; // consecutive clean Ctrl taps that open the command prompt
 static Color cfg_color_bg        = { 30, 30, 38, 255 };
 static Color cfg_color_fg        = { 220, 220, 230, 255 };
 static Color cfg_color_cursor    = { 120, 200, 255, 255 };
@@ -69,6 +71,8 @@ static void loadConfig(void) {
     if (scriptCfgBool("cursor_blink", &b)) cfg_cursor_blink = b;
     if (scriptCfgFloat("cursor_blink_period", &f)) cfg_cursor_blink_period = (double)f;
     if (scriptCfgLong("undo_depth", &l) && l > 0) cfg_undo_depth = (size_t)l;
+    if (scriptCfgLong("leader_taps", &l) && l > 0) cfg_leader_taps = (int)l;
+    if (scriptCfgLong("command_taps", &l) && l > 0) cfg_command_taps = (int)l;
     loadColorCfg("color_bg", &cfg_color_bg);
     loadColorCfg("color_fg", &cfg_color_fg);
     loadColorCfg("color_cursor", &cfg_color_cursor);
@@ -1322,6 +1326,19 @@ static void applyAction(Action action) {
         case ACTION_OTHER_WINDOW: scriptOtherWindow(); break;
         case ACTION_DELETE_WINDOW: scriptDeleteWindow(); break;
         case ACTION_DELETE_OTHER_WINDOWS: scriptDeleteOtherWindows(); break;
+        case ACTION_TOGGLE_MODAL:
+            modal = !modal;
+            echo(modal ? "Modal ON (m/Esc to exit)" : "Modal OFF");
+            break;
+        case ACTION_TOGGLE_MARK:
+            mark_active = !mark_active;
+            anchor = cursor;
+            echo(mark_active ? "Mark set" : "Mark deactivated");
+            break;
+        case ACTION_RELOAD_CONFIG:
+            if (scriptReloadConfig()) { loadConfig(); echo("Config reloaded"); }
+            else echo("Config reload failed");
+            break;
         default: break;
     }
 }
@@ -1533,10 +1550,13 @@ static void handleInput(bool ctrl, Metrics m) {
         return;
     }
     // C-Space (or bare Space in modal) toggles the mark; movement then extends.
+    // Hardcoded here (not via key_binding/3) so modal mode's own nav-only
+    // restriction can't shadow it -- ACTION_TOGGLE_MARK is still a real,
+    // named action (te_action('toggle-mark'), reachable from the command
+    // prompt or a custom handler), just not one this specific shortcut key
+    // is looked up through.
     if (cmd && platformKeyPressed(GLFW_KEY_SPACE)) {
-        mark_active = !mark_active;
-        anchor = cursor;
-        echo(mark_active ? "Mark set" : "Mark deactivated");
+        runAction(ACTION_TOGGLE_MARK);
         noteActivity();
         return;
     }
@@ -1587,10 +1607,12 @@ static void handleInput(bool ctrl, Metrics m) {
     }
 }
 
-// Detect Ctrl double/triple taps. A tap is Ctrl pressed then released with no
-// other key pressed while it was held. Two taps arm the leader; a third opens
-// the command prompt. There is no timeout -- the count resets only when a
-// non-Ctrl key is pressed -- so a pause between taps still gets you there.
+// Detect Ctrl taps. A tap is Ctrl pressed then released with no other key
+// pressed while it was held. cfg(leader_taps, _) consecutive taps (2 by
+// default) arm the leader; cfg(command_taps, _) (3 by default) opens the
+// command prompt -- see loadConfig. There is no timeout -- the count resets
+// only when a non-Ctrl key is pressed -- so a pause between taps still gets
+// you there.
 // Runs only in normal editing mode. Draining the key-pressed queue here is
 // safe: bindings use platformKeyPressed and text uses platformCharPressed,
 // both independent of it.
@@ -1608,10 +1630,10 @@ static void detectCtrlTaps(void) {
     if (platformKeyReleased(lc) || platformKeyReleased(rc)) {
         if (ctrl_clean) {
             ctrl_taps++;
-            if (ctrl_taps == 2) {
+            if (ctrl_taps == cfg_leader_taps) {
                 prefix_pending = true;
                 noteActivity();
-            } else if (ctrl_taps >= 3) {
+            } else if (ctrl_taps >= cfg_command_taps) {
                 ctrl_taps = 0;
                 prefix_pending = false;
                 mbStartPrompt(MBI_COMMAND, "Command: ", NULL, 0);
@@ -2582,10 +2604,14 @@ int main(int argc, char **argv) {
         // C-m toggles modal (command) mode: bare keys run the Ctrl-key actions
         // and typing is suppressed (see handleInput). Ignored while a minibuffer
         // prompt is open so 'm' types normally there; swallow the toggling key so
-        // the bare 'm' that exits modal isn't inserted as text.
+        // the bare 'm' that exits modal isn't inserted as text. Hardcoded here
+        // (not via key_binding/3) since modal mode's own nav-only restriction
+        // would otherwise block the very key that's supposed to turn it back
+        // off -- ACTION_TOGGLE_MODAL is still a real, named action
+        // (te_action('toggle-modal')), just not one this shortcut key is
+        // looked up through.
         if (platformKeyPressed(GLFW_KEY_M) && (ctrl || (modal && mb_kind == MB_NONE))) {
-            modal = !modal;
-            echo(modal ? "Modal ON (m/Esc to exit)" : "Modal OFF");
+            runAction(ACTION_TOGGLE_MODAL);
             while (platformCharPressed() != 0) {}
             swallow_char_frames = 3;
         }

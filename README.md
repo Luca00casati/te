@@ -33,6 +33,7 @@ default — re-enable them in `src/binding.h`)
 | Ctrl+D | End of word |
 | Ctrl+J / Ctrl+Shift+J | Screen up / down |
 | Ctrl+`<digit>` | Repeat the next action **or typed character** N times (`Ctrl+3` `w` → `www`) |
+| Ctrl+M | Toggle **modal mode**: bare keys act like their Ctrl-chord and typing is suppressed, vim-normal-mode-style — `m`/Esc exits |
 
 **Selection & clipboard**
 
@@ -107,8 +108,9 @@ Named commands (leader, then type the name): `save`, `save-as`, `open`,
 `replace-regex`, `replace-all`, `replace-all-regex`, `undo`, `redo`, `copy`,
 `cut`, `paste`, `select-all`, `toggle-wrap`, `quit`, `switch-buffer`,
 `kill-buffer`, `next-buffer`, `prev-buffer`, `list-buffers`, `split-right`,
-`split-below`, `other-window`, `delete-window`, `delete-other-windows`.
-(Each name is the action's own tag, so they can't drift.)
+`split-below`, `other-window`, `delete-window`, `delete-other-windows`,
+`toggle-modal`, `toggle-mark`, `reload-config`. (Each name is the action's
+own tag, so they can't drift.)
 
 There's an **Emacs-style minibuffer** on the bottom line: file open/save-as,
 search, the quit confirmation, and transient echo messages all happen there.
@@ -179,14 +181,18 @@ built-in. An uncaught error inside a handler is echoed rather than
 crashing `te`.
 
 **Configuration** is also plain facts: window size/title, font size, margins,
-colors, the tab-insert text, buffer capacity, undo depth, and the mouse
-wheel's scroll speed are `cfg(Key, Value)` facts in `scripts/config.pl`
-(`scripts/config.pl` itself documents every key), read once at startup
-before the window opens — there's no live-reload, so a change takes effect
-on the next launch. A `cfg/2` fact in `init.pl` (e.g.
-`cfg(color_bg, rgb(20, 20, 28)).`) overrides the matching default the same
-way a `key_binding/3` override does, since `init.pl` loads first. Colors are
-`rgb(R, G, B)` or `rgba(R, G, B, A)` compound terms, 0–255 per channel.
+colors, the tab-insert text, buffer capacity, undo depth, the mouse wheel's
+scroll speed, and the leader/command-prompt tap counts are `cfg(Key, Value)`
+facts in `scripts/config.pl` (`scripts/config.pl` itself documents every
+key), read once at startup before the window opens. A `cfg/2` fact in
+`init.pl` (e.g. `cfg(color_bg, rgb(20, 20, 28)).`) overrides the matching
+default the same way a `key_binding/3` override does, since `init.pl` loads
+first. Colors are `rgb(R, G, B)` or `rgba(R, G, B, A)` compound terms, 0–255
+per channel. Edit `scripts/config.pl` (or a `cfg/2` fact in `init.pl`) and
+run the `reload-config` command to pick it up without restarting — it
+re-consults `init.pl` then `scripts/config.pl` and re-applies every knob;
+everything else in `init.pl` (bindings, hooks, ...) reruns too, so a
+non-idempotent `:-` directive there fires again.
 
 The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch, ISO-flavored
 Prolog**, not a wrapper around an external library: facts/rules, unification,

@@ -4,10 +4,11 @@
 % scriptInit), so a cfg/2 fact for the same Key in init.pl overrides the
 % default here: the same "first assertion wins" pattern default_bindings.pl
 % already uses for key_binding/leader_binding/command (clauses are tried in
-% assertion order, first match runs). Read at startup only (main.c's
-% loadConfig, called once before the window opens) via script.c's
-% scriptCfgFloat/Long/Bool/Text/Color -- not re-queried per frame, so
-% changing one of these takes effect on the next launch, not live.
+% assertion order, first match runs). Read at startup (main.c's loadConfig)
+% via script.c's scriptCfgFloat/Long/Bool/Text/Color -- not re-queried per
+% frame, so editing this file only takes effect after either a restart or
+% running the `reload-config` command (leader, then type the name), which
+% re-consults init.pl and this file, then re-runs loadConfig.
 %
 % Colors are rgb(R, G, B) or rgba(R, G, B, A) compound terms, 0-255 per
 % channel.
@@ -42,6 +43,14 @@ cfg(cursor_blink_period, 0.5).
 
 % How many undo steps to keep (scripts/undo_history.pl's eviction).
 cfg(undo_depth, 4096).
+
+% Consecutive clean Ctrl taps (Ctrl pressed and released with no other key
+% pressed while held) that arm the leader / open the command prompt --
+% command_taps should be greater than leader_taps, since the tap count
+% keeps climbing past leader_taps until it reaches command_taps or a
+% non-Ctrl key resets it (see main.c's detectCtrlTaps).
+cfg(leader_taps, 2).
+cfg(command_taps, 3).
 
 cfg(color_bg,        rgb(30, 30, 38)).
 cfg(color_fg,        rgb(220, 220, 230)).

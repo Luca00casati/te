@@ -643,6 +643,35 @@ static void test_window_layout_and_click_hit_test(void) {
     CHECK(editorWindowClose(win2));
 }
 
+// --- misc actions (src/binding.h, src/main.c) -----------------------------
+// toggle-modal/toggle-mark are still reached at C-m/C-Space via a hardcoded
+// check in main() (see its comment: modal mode's own nav-only restriction
+// would otherwise be able to shadow the very key that turns it back off),
+// but ACTION_TOGGLE_MODAL/ACTION_TOGGLE_MARK are ordinary named actions
+// like any other -- this exercises them the same way a custom handler or
+// the command prompt would, via runAction, independent of that shortcut.
+static void test_toggle_modal_and_mark_actions(void) {
+    reset();
+    CHECK(modal == false);
+    runAction(ACTION_TOGGLE_MODAL);
+    CHECK(modal == true);
+    CHECK(echo_len == strlen("Modal ON (m/Esc to exit)"));
+    runAction(ACTION_TOGGLE_MODAL);
+    CHECK(modal == false);
+    CHECK(echo_len == strlen("Modal OFF"));
+
+    setText("hello world"); // also resets mark_active/cursor/anchor to a known state
+    CHECK(mark_active == false);
+    cursor = 5; // arbitrary, != anchor(0); toggle-mark should snap anchor to it
+    runAction(ACTION_TOGGLE_MARK);
+    CHECK(mark_active == true);
+    CHECK(anchor == cursor);
+    CHECK(echo_len == strlen("Mark set"));
+    runAction(ACTION_TOGGLE_MARK);
+    CHECK(mark_active == false);
+    CHECK(echo_len == strlen("Mark deactivated"));
+}
+
 // --- Prolog scripting (src/script.c) -------------------------------------
 static void test_script_loads_and_runs_api(void) {
     reset();
@@ -683,6 +712,43 @@ static void test_script_hooks_fire_on_save_and_open(void) {
     openPath(path); // openPath's own "Opened ..." echo is overwritten by the hook
     CHECK(echo_len == strlen("post-open fired"));
     CHECK(memcmp(echo_buf, "post-open fired", echo_len) == 0);
+
+    unlink(path);
+    scriptShutdown();
+}
+
+// reload-config (ACTION_RELOAD_CONFIG -> scriptReloadConfig) has to notice
+// a cfg/2 fact that changed on disk, not keep finding the one already
+// asserted from the first consult -- first-assertion-wins would do exactly
+// that without scriptReloadConfig's retractall(cfg(_, _)) first. Exercises
+// scriptReloadConfig + loadConfig directly (what ACTION_RELOAD_CONFIG's
+// applyAction case calls), not through a simulated keypress.
+static void test_reload_config_applies_a_changed_cfg_fact(void) {
+    reset();
+    char path[] = "/tmp/te_unit_test_reload_cfg_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    close(fd);
+
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    static const char v1[] = "cfg(color_bg, rgb(1, 2, 3)).\n";
+    fwrite(v1, 1, strlen(v1), f);
+    fclose(f);
+
+    scriptInitFromFile(path);
+    loadConfig();
+    CHECK(cfg_color_bg.r == 1 && cfg_color_bg.g == 2 && cfg_color_bg.b == 3);
+
+    f = fopen(path, "wb"); // stand-in for the user editing the file
+    CHECK(f != NULL);
+    static const char v2[] = "cfg(color_bg, rgb(4, 5, 6)).\n";
+    fwrite(v2, 1, strlen(v2), f);
+    fclose(f);
+
+    CHECK(scriptReloadConfig());
+    loadConfig();
+    CHECK(cfg_color_bg.r == 4 && cfg_color_bg.g == 5 && cfg_color_bg.b == 6);
 
     unlink(path);
     scriptShutdown();
@@ -757,10 +823,13 @@ int main(void) {
     RUN(test_window_delete_others);
     RUN(test_window_layout_and_click_hit_test);
 
+    RUN(test_toggle_modal_and_mark_actions);
+
     scriptShutdown(); // the script-specific tests below set up their own engine each
     RUN(test_script_loads_and_runs_api);
     RUN(test_script_error_is_echoed_not_fatal);
     RUN(test_script_hooks_fire_on_save_and_open);
+    RUN(test_reload_config_applies_a_changed_cfg_fact);
 
     fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

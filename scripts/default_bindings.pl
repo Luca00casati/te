@@ -112,3 +112,12 @@ command('split-below', te_action('split-below')).
 command('other-window', te_action('other-window')).
 command('delete-window', te_action('delete-window')).
 command('delete-other-windows', te_action('delete-other-windows')).
+
+% toggle-modal/toggle-mark are also reachable at C-m/C-Space -- those
+% shortcuts stay hardcoded in main.c (not key_binding/3 facts) since modal
+% mode's own nav-only restriction would otherwise be able to shadow the very
+% key that turns it back off, but the actions themselves are ordinary named
+% actions like any other, reachable here and from a custom handler.
+command('toggle-modal', te_action('toggle-modal')).
+command('toggle-mark', te_action('toggle-mark')).
+command('reload-config', te_action('reload-config')).
