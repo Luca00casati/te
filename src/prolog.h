@@ -63,7 +63,16 @@ void prologConsultFile(Prolog *pl, const char *path);
 // (parsing a goal, solving it, solving any handler it triggers) and reset
 // once, after the *last* use of any term from that batch.
 size_t prologMark(Prolog *pl);
+// Resets the query arena back to `mark`. Once every open mark has been
+// reset (i.e. no query is in flight), this is also the sole trigger point
+// for compacting the permanent clause-storage arena -- see prolog.c's
+// compactProgram -- to reclaim what retract/1 leaves behind.
 void prologReset(Prolog *pl, size_t mark);
+
+// Total bytes currently used by the permanent clause-storage arena --
+// introspection only, for tests that check retract/1's arena-compaction
+// fix actually bounds memory growth (see compactProgram in prolog.c).
+size_t prologProgramBytes(Prolog *pl);
 
 // Parses one term (a goal or a plain data term) from a NUL-terminated
 // string in the current query arena. Returns NULL on a syntax error

@@ -72,12 +72,22 @@ build/cli_te.o: tests/cli_te.c | build
 build/cli_te: build/cli_te.o
 	$(CC) $^ -o $@
 
+# tests/unit_prolog.c exercises src/prolog.c/.h directly (it's not editor-
+# specific, so unlike unit_te.c it doesn't need to #include main.c or link
+# against GLFW/PCRE2/FreeType/libpng at all).
+build/unit_prolog.o: tests/unit_prolog.c | build
+	$(CC) -std=c11 -Wall -Wextra -MMD -MP -c $< -o $@
+
+build/unit_prolog: build/unit_prolog.o build/prolog.o
+	$(CC) $^ -o $@ -lm
+
 run: te
 	./te $(ARGS)
 
-test: build/unit_te build/cli_te
+test: build/unit_te build/cli_te build/unit_prolog
 	./build/unit_te
 	./build/cli_te te
+	./build/unit_prolog
 
 clean:
 	rm -rf build te

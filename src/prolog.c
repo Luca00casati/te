@@ -49,6 +49,10 @@ typedef struct Term Term;
 // --- Arena (chunked bump allocator, mark/reset, never realloc'd) ------
 
 #define ARENA_BLOCK_SIZE (64 * 1024)
+// How many retract/1 calls accumulate before compactProgram (below) runs --
+// config-scale, matching this file's own stated design philosophy (see the
+// header comment).
+#define PROLOG_COMPACT_RETRACT_INTERVAL 2000
 
 typedef struct ArenaBlock {
     struct ArenaBlock *next;
@@ -159,6 +163,7 @@ struct Prolog {
     void *errorCtx;
     ArenaMark *markStack;
     size_t markStackTop, markStackCap;
+    size_t retractsSinceCompact; // see compactProgram
     Atom atomComma, atomSemi, atomArrow, atomCut, atomTrue, atomFail, atomFalse,
          atomNaf, atomCall, atomCatch, atomThrow, atomColonDash, atomNil, atomDot, atomError;
 };
@@ -918,11 +923,48 @@ static bool nativeRetract(Prolog *pl, Term **a, int arity, void *ctx) {
         if (unify(pl, headPat, ch) && unify(pl, bodyPat, cb)) {
             if (prev) prev->next = c->next; else pred->first = c->next;
             if (pred->last == c) pred->last = prev;
+            pl->retractsSinceCompact++;
             return true;
         }
         undoTrailTo(pl, tmark);
     }
     return false;
+}
+
+// retract() above only unlinks a Clause node from its predicate's list --
+// `program` is a bump allocator with no free-list, so the node's arena bytes
+// stay allocated. Every "retract this singleton fact, assertz its
+// replacement" update (src/*.pl's mutable-state idiom: undo history,
+// goal-column tracking, search state, buffer-local variables) would
+// otherwise leak permanently over a long session. This is a copying
+// compaction: walk every predicate's still-live clauses and copy them into
+// a fresh arena, then discard the old one. Only called from prologReset,
+// and only when markStackTop == 0 (no query in flight) -- solve()'s clause
+// loop holds a live `Clause *c` into `program` for the entire nested C call
+// stack of whatever it's currently solving, so compacting mid-query would
+// leave that dangling; between queries, by the mark/reset contract, nothing
+// anywhere holds a pointer into `program`'s old blocks.
+static void compactProgram(Prolog *pl) {
+    Arena fresh = { 0 };
+    for (size_t i = 0; i < pl->preds.count; i++) {
+        Predicate *pred = pl->preds.items[i];
+        Clause *newFirst = NULL, *newLast = NULL;
+        for (Clause *c = pred->first; c; c = c->next) {
+            VarMap map = { 0 };
+            Term *h2 = copyTermRec(&fresh, c->head, &map);
+            Term *b2 = c->body ? copyTermRec(&fresh, c->body, &map) : NULL;
+            freeVarMap(&map);
+            Clause *nc = arenaAlloc(&fresh, sizeof(Clause));
+            nc->head = h2; nc->body = b2; nc->next = NULL;
+            if (!newFirst) newFirst = newLast = nc;
+            else { newLast->next = nc; newLast = nc; }
+        }
+        pred->first = newFirst;
+        pred->last = newLast;
+    }
+    arenaFreeAll(&pl->program);
+    pl->program = fresh;
+    pl->retractsSinceCompact = 0;
 }
 
 typedef struct { Term *templateTerm; Term **items; size_t count, cap; } FindallCtx;
@@ -1789,6 +1831,13 @@ size_t prologMark(Prolog *pl) {
 void prologReset(Prolog *pl, size_t mark) {
     arenaReset(&pl->query, pl->markStack[mark]);
     pl->markStackTop = mark;
+    if (pl->markStackTop == 0 && pl->retractsSinceCompact >= PROLOG_COMPACT_RETRACT_INTERVAL)
+        compactProgram(pl);
+}
+size_t prologProgramBytes(Prolog *pl) {
+    size_t total = 0;
+    for (ArenaBlock *b = pl->program.first; b; b = b->next) total += b->used;
+    return total;
 }
 
 PlTerm *prologParseTerm(Prolog *pl, const char *src) {
