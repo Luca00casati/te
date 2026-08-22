@@ -76,7 +76,7 @@ static void test_utf8_roundtrip(void) {
     memcpy(text, buf, n);
     len = n;
     Cp d = decodeCp(0, len);
-    CHECK(d.cp == 0xE9 && d.len == 2);
+    CHECK(d.cp == 0xE9 && d.nbytes == 2);
 
     n = utf8Encode(0x20AC, buf); // euro sign, U+20AC
     CHECK(n == 3);
@@ -84,7 +84,7 @@ static void test_utf8_roundtrip(void) {
     memcpy(text, buf, n);
     len = n;
     d = decodeCp(0, len);
-    CHECK(d.cp == 0x20AC && d.len == 3);
+    CHECK(d.cp == 0x20AC && d.nbytes == 3);
 }
 
 static void test_utf8_malformed_falls_back(void) {
@@ -93,7 +93,7 @@ static void test_utf8_malformed_falls_back(void) {
     memcpy(text, raw, sizeof(raw));
     len = sizeof(raw);
     Cp d = decodeCp(0, len);
-    CHECK(d.cp == 0xC3 && d.len == 1); // falls back to a single raw byte
+    CHECK(d.cp == 0xC3 && d.nbytes == 1); // falls back to a single raw byte
 }
 
 static void test_isCont(void) {

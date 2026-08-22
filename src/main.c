@@ -23,7 +23,7 @@
 
 // --- small value types -------------------------------------------------
 typedef struct { size_t line, col; } LineCol;
-typedef struct { uint32_t cp; size_t len; } Cp;
+typedef struct { uint32_t cp; size_t nbytes; } Cp;
 typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; } Metrics;
 
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
@@ -363,7 +363,7 @@ static LineCol cursorLineCol(void) {
         } else {
             Cp d = decodeCp(i, cursor);
             col += cpCells(d.cp);
-            i += d.len;
+            i += d.nbytes;
         }
     }
     LineCol lc = { line, col };
@@ -450,7 +450,7 @@ static size_t colsIn(size_t a, size_t b) {
     while (i < b) {
         Cp d = decodeCp(i, b);
         n += cpCells(d.cp);
-        i += d.len;
+        i += d.nbytes;
     }
     return n;
 }
@@ -464,7 +464,7 @@ static size_t byteAtCol(size_t start, size_t stop, size_t col) {
         size_t w = cpCells(d.cp);
         if (c + w > col) break;
         c += w;
-        i += d.len;
+        i += d.nbytes;
     }
     return i;
 }
@@ -488,24 +488,24 @@ static void drawCells(float cw, float x0, float y, size_t s, size_t e, Color col
     while (i < e) {
         Cp d = decodeCp(i, e);
         x = drawCp(d.cp, x, y, cw, color);
-        i += d.len;
+        i += d.nbytes;
     }
 }
 // Decodes one UTF-8 codepoint from a plain C string at b[i] (same leniency
 // as decodeCp, just over an arbitrary buffer instead of the text[] buffer).
 static Cp decodeCpStr(const unsigned char *b, size_t i, size_t n) {
-    size_t len = utf8SeqLen(b[i]);
+    size_t seqlen = utf8SeqLen(b[i]);
     uint32_t cp = b[i];
-    if (len >= 2 && i + len <= n) {
-        cp = (len == 2) ? (b[i] & 0x1F) : (len == 3) ? (b[i] & 0x0F) : (b[i] & 0x07);
+    if (seqlen >= 2 && i + seqlen <= n) {
+        cp = (seqlen == 2) ? (b[i] & 0x1F) : (seqlen == 3) ? (b[i] & 0x0F) : (b[i] & 0x07);
         bool ok = true;
-        for (size_t k = 1; k < len; k++) {
+        for (size_t k = 1; k < seqlen; k++) {
             if ((b[i + k] & 0xC0) != 0x80) { ok = false; break; }
             cp = (cp << 6) | (b[i + k] & 0x3F);
         }
-        if (!ok) { cp = b[i]; len = 1; }
-    } else len = 1;
-    Cp out = { cp, len };
+        if (!ok) { cp = b[i]; seqlen = 1; }
+    } else seqlen = 1;
+    Cp out = { cp, seqlen };
     return out;
 }
 // Draw a NUL-terminated UTF-8 C string (minibuffer/status/help labels --
@@ -517,7 +517,7 @@ static void drawStr(const char *s, float cw, float x0, float y, Color color) {
     while (i < n) {
         Cp d = decodeCpStr(b, i, n);
         x = drawCp(d.cp, x, y, cw, color);
-        i += d.len;
+        i += d.nbytes;
     }
 }
 // Pixel width of a plain C string, same cell-width model as drawStr but
@@ -530,7 +530,7 @@ static float strWidth(const char *s, float cw) {
     while (i < n) {
         Cp d = decodeCpStr(b, i, n);
         w += (d.cp < 0x20) ? cw : (float)cpCells(d.cp) * cw;
-        i += d.len;
+        i += d.nbytes;
     }
     return w;
 }
