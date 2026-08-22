@@ -60,6 +60,18 @@ typedef enum {
     ACTION_REPLACE_ALL_REGEX,     // replace every regex match at once (command only)
     ACTION_TOGGLE_WRAP,           // soft line wrapping on/off
     ACTION_QUIT,
+    // buffers (src/buffers.pl)
+    ACTION_SWITCH_BUFFER,         // prompt for a buffer name in the minibuffer
+    ACTION_KILL_BUFFER,           // close the current buffer (prompts to save first if dirty)
+    ACTION_NEXT_BUFFER,
+    ACTION_PREV_BUFFER,
+    ACTION_LIST_BUFFERS,          // overlay listing every open buffer
+    // windows (src/windows.pl)
+    ACTION_SPLIT_RIGHT,
+    ACTION_SPLIT_BELOW,
+    ACTION_OTHER_WINDOW,          // cycle focus to the next pane
+    ACTION_DELETE_WINDOW,         // close the selected pane (not its buffer)
+    ACTION_DELETE_OTHER_WINDOWS,  // collapse to just the selected pane
     ACTION_COUNT,
 } Action;
 
@@ -156,6 +168,16 @@ static const Command COMMANDS[] = {
     { "replace-all-regex", ACTION_REPLACE_ALL_REGEX },
     { "toggle-wrap", ACTION_TOGGLE_WRAP },
     { "quit", ACTION_QUIT },
+    { "switch-buffer", ACTION_SWITCH_BUFFER },
+    { "kill-buffer", ACTION_KILL_BUFFER },
+    { "next-buffer", ACTION_NEXT_BUFFER },
+    { "prev-buffer", ACTION_PREV_BUFFER },
+    { "list-buffers", ACTION_LIST_BUFFERS },
+    { "split-right", ACTION_SPLIT_RIGHT },
+    { "split-below", ACTION_SPLIT_BELOW },
+    { "other-window", ACTION_OTHER_WINDOW },
+    { "delete-window", ACTION_DELETE_WINDOW },
+    { "delete-other-windows", ACTION_DELETE_OTHER_WINDOWS },
 };
 static const size_t COMMANDS_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
 
@@ -208,6 +230,16 @@ static const char *const ACTION_LABELS[ACTION_COUNT] = {
     [ACTION_REPLACE_ALL_REGEX] = "replace all regex",
     [ACTION_TOGGLE_WRAP] = "toggle wrap",
     [ACTION_QUIT] = "quit",
+    [ACTION_SWITCH_BUFFER] = "switch buffer",
+    [ACTION_KILL_BUFFER] = "kill buffer",
+    [ACTION_NEXT_BUFFER] = "next buffer",
+    [ACTION_PREV_BUFFER] = "prev buffer",
+    [ACTION_LIST_BUFFERS] = "list buffers",
+    [ACTION_SPLIT_RIGHT] = "split right",
+    [ACTION_SPLIT_BELOW] = "split below",
+    [ACTION_OTHER_WINDOW] = "other window",
+    [ACTION_DELETE_WINDOW] = "delete window",
+    [ACTION_DELETE_OTHER_WINDOWS] = "delete other windows",
 };
 
 #endif // TE_BINDING_H

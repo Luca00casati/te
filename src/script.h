@@ -225,4 +225,24 @@ void scriptCopyLine(void);
 void scriptPasteLine(void);
 void scriptSelectLine(void);
 
+// --- buffers/windows UI (src/buffers.pl, src/windows.pl) -------------------
+// Buffer/window *state* (list/name/dirty/current) is main.c's own -- read
+// directly via editor.h's editorBufferCount/editorBufferIdAt/
+// editorBufferName/editorBufferDirty/editorCurrentBufferId, no Prolog round
+// trip needed for a read-only listing (main.c's drawHelp does this for the
+// list-buffers overlay). These wrappers are for the *policy* decisions on
+// top (which buffer/window becomes current), the same "native does raw
+// work, Prolog decides" split as everywhere else in this file.
+
+void scriptOpenFile(const char *path, size_t path_len); // open_file/1: reuse-if-already-open
+bool scriptSwitchBufferByName(const unsigned char *name, size_t name_len); // false: no match
+void scriptKillCurrentBuffer(void);
+void scriptNextBuffer(void);
+void scriptPrevBuffer(void);
+void scriptSplitRight(void);
+void scriptSplitBelow(void);
+void scriptOtherWindow(void);
+void scriptDeleteWindow(void);
+void scriptDeleteOtherWindows(void);
+
 #endif // TE_SCRIPT_H

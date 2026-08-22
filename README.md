@@ -1,7 +1,8 @@
 # te — a simple GUI text editor in C + GLFW
 
-A minimal GUI text editor, built and tested on **Linux only**. Single window,
-monospace grid, load/edit/save a plain-text file. Built with
+A minimal GUI text editor, built and tested on **Linux only**. Multiple
+buffers, Emacs-style split/tiled windows, monospace grid, load/edit/save
+plain-text files. Built with
 [GLFW](https://www.glfw.org/) (windowing/input) + OpenGL 1.1 (rendering),
 PCRE2, FreeType2 (font rasterization), and libpng (screenshot PNG output) —
 all linked from the system install, found via pkg-config — plus a small
@@ -68,6 +69,22 @@ default — re-enable them in `src/binding.h`)
 | Esc / Ctrl+G | Cancel minibuffer / clear selection & mark |
 | Ctrl+Q / close window | Quit (asks y/n/c if unsaved) |
 
+**Buffers & split windows**
+
+| Key | Action |
+| --- | --- |
+| Leader then B | Switch buffer (minibuffer, by name) |
+| Leader then K | Kill buffer (asks y/n/c if unsaved) |
+| Leader then . / , | Next / previous buffer |
+| Leader then L | List buffers (overlay) |
+| Leader then 2 / 3 | Split below / split right |
+| Leader then Tab | Switch to the other pane |
+| Leader then 0 / 1 | Close this pane / close all other panes |
+
+Opening a file that's already open in another buffer switches to it instead
+of re-reading it from disk — unsaved changes in that buffer are no longer
+silently discarded the way the old single-buffer `open` used to.
+
 **Search:** `Ctrl+S` (literal) or `Ctrl+Shift+S` (regex) opens the search
 prompt. It jumps to the nearest match as you type and shows `Match X/N` in the
 echo area; **`Ctrl+N` / `Ctrl+P`** step to the next / previous match. `Enter`
@@ -88,8 +105,10 @@ search toward the top of the file.
 Named commands (leader, then type the name): `save`, `save-as`, `open`,
 `search`, `search-regex`, `search-reverse`, `search-regex-reverse`, `replace`,
 `replace-regex`, `replace-all`, `replace-all-regex`, `undo`, `redo`, `copy`,
-`cut`, `paste`, `select-all`, `toggle-wrap`, `quit`. (Each name is the action's
-own tag, so they can't drift.)
+`cut`, `paste`, `select-all`, `toggle-wrap`, `quit`, `switch-buffer`,
+`kill-buffer`, `next-buffer`, `prev-buffer`, `list-buffers`, `split-right`,
+`split-below`, `other-window`, `delete-window`, `delete-other-windows`.
+(Each name is the action's own tag, so they can't drift.)
 
 There's an **Emacs-style minibuffer** on the bottom line: file open/save-as,
 search, the quit confirmation, and transient echo messages all happen there.
@@ -335,6 +354,27 @@ Two suites, both under `tests/`:
   cursor to where it belongs when that differs from `te_apply_replace`'s own
   default (the end of what it just spliced in) — e.g. `open-line-above`
   landing on the new blank line rather than after the newline it inserted.
+- `src/buffers.pl` — buffer-local variables (`blocal_get/2`/`blocal_set/2`,
+  one `blocal(BufId, Key, Value)` fact per buffer/key, replacing what used
+  to be global singleton facts) and the switch/open/kill/next/prev-buffer
+  policy on top of the native buffer primitives (`te_buffer_create/1`,
+  `te_buffer_open_file/2`, `te_buffer_find_by_path/2`, `te_buffer_kill/1`,
+  `te_buffer_list/1`, `te_current_buffer/1`, ... in `script.c`) — creating/
+  freeing a `Buffer` and keeping every `Window`'s pointer to it valid stays
+  native; this is the decision logic on top, including reusing an
+  already-open buffer instead of re-reading it (see Controls above) and
+  clearing a killed buffer's own `blocal/3` facts so they don't linger.
+  `src/undo_history.pl` and `src/search.pl` store their per-buffer state
+  through it now, so opening a second file no longer shares (or clobbers)
+  the first one's undo stack or in-progress search.
+- `src/windows.pl` — `split-right`/`split-below`/`other-window`/
+  `delete-window`/`delete-other-windows`, thin policy wrappers over the
+  native window primitives (`te_window_split/3`, `te_window_close/1`,
+  `te_selected_window/1`, `te_select_window/1`, ... in `script.c`). Each
+  `Window` is a leaf (its own cursor/anchor/scroll/wrap over some `Buffer`)
+  or a split node in a binary tree; `main.c`'s `computeLayout` turns that
+  tree into on-screen pane rects every frame, and mouse clicks re-select
+  the pane under the cursor the same way a keyboard `other-window` does.
 - The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
   `src/script.c`, and `src/prolog.c` as C11 and links against GLFW3, OpenGL,
   libpcre2-8, FreeType2, and libpng (found via pkg-config; the Prolog engine

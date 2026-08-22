@@ -106,3 +106,16 @@ cycle_buffer(Ids, Cur, Delta) :-
 % compaction fix, prolog.c's compactProgram, can't help with: those facts
 % are still *live*, just permanently unreachable via te_current_buffer).
 kill_buffer(Id) :- retractall(blocal(Id, _, _)), te_buffer_kill(Id).
+kill_current_buffer :- te_current_buffer(Id), kill_buffer(Id).
+
+% Switches to the buffer whose display name matches NameCodes (te_buffer_
+% name/2 -- typically the filename's basename), or fails if none does; the
+% caller (script.c's scriptSwitchBufferByName) reports "no such buffer"
+% itself on failure, the same division of labor te_run_command's "no
+% command: ..." already has.
+switch_buffer_by_name(NameCodes) :-
+    te_buffer_list(Ids),
+    member(Id, Ids),
+    te_buffer_name(Id, NameCodes),
+    !,
+    switch_buffer(Id).

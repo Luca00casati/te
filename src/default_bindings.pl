@@ -22,6 +22,22 @@ leader_binding(a, any, te_action('select-all')).
 leader_binding(space, any, te_action('select-line')).
 leader_binding(q, any, te_action('quit')).
 
+% buffers (src/buffers.pl) -- 'n'/'h' stay reserved for the key/commands
+% help overlays (hardcoded in main.c's handlePrefix, checked only after
+% leader_binding/3 finds no match).
+leader_binding(b, any, te_action('switch-buffer')).
+leader_binding(k, any, te_action('kill-buffer')).
+leader_binding(l, any, te_action('list-buffers')).
+leader_binding('.', any, te_action('next-buffer')).
+leader_binding(',', any, te_action('prev-buffer')).
+
+% windows (src/windows.pl) -- numbered to mirror Emacs's C-x 0/1/2/3.
+leader_binding('2', any, te_action('split-below')).
+leader_binding('3', any, te_action('split-right')).
+leader_binding(tab, any, te_action('other-window')).
+leader_binding('0', any, te_action('delete-window')).
+leader_binding('1', any, te_action('delete-other-windows')).
+
 % --- top-level keys, auto-repeat while held -------------------------------
 
 key_binding(enter, any, te_action('newline')).
@@ -85,3 +101,14 @@ command('paste', te_action('paste')).
 command('select-all', te_action('select-all')).
 command('toggle-wrap', te_action('toggle-wrap')).
 command('quit', te_action('quit')).
+
+command('switch-buffer', te_action('switch-buffer')).
+command('kill-buffer', te_action('kill-buffer')).
+command('next-buffer', te_action('next-buffer')).
+command('prev-buffer', te_action('prev-buffer')).
+command('list-buffers', te_action('list-buffers')).
+command('split-right', te_action('split-right')).
+command('split-below', te_action('split-below')).
+command('other-window', te_action('other-window')).
+command('delete-window', te_action('delete-window')).
+command('delete-other-windows', te_action('delete-other-windows')).

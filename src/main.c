@@ -30,8 +30,11 @@ typedef struct { uint32_t cp; size_t nbytes; } Cp;
 typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; float origin_y; } Metrics;
 
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
-typedef enum { MBI_NONE, MBI_FIND_FILE, MBI_WRITE_FILE, MBI_SEARCH, MBI_REPLACE_FROM, MBI_REPLACE_TO, MBI_QUIT, MBI_COMMAND } MbIntent;
-typedef enum { HELP_NONE, HELP_NAV, HELP_COMMANDS } HelpKind;
+typedef enum {
+    MBI_NONE, MBI_FIND_FILE, MBI_WRITE_FILE, MBI_SEARCH, MBI_REPLACE_FROM, MBI_REPLACE_TO,
+    MBI_QUIT, MBI_COMMAND, MBI_SWITCH_BUFFER, MBI_KILL_BUFFER,
+} MbIntent;
+typedef enum { HELP_NONE, HELP_NAV, HELP_COMMANDS, HELP_BUFFERS } HelpKind;
 
 // --- font (loaded from disk at runtime, next to the executable) --------
 static unsigned char *font_bytes = NULL;
@@ -981,7 +984,11 @@ static void mbComplete(void) {
 static void mbConfirm(void) {
     switch (mb_intent) {
         case MBI_FIND_FILE:
-            if (mb_len > 0) openPath(mb_input);
+            // open_file/1 (src/buffers.pl): reuses an already-open buffer for
+            // this path instead of re-reading it -- a real behavior change
+            // from the old always-clobber-the-current-buffer openPath call
+            // this replaced (see README).
+            if (mb_len > 0) scriptOpenFile(mb_input, mb_len);
             else echo("Aborted");
             break;
         case MBI_WRITE_FILE:
@@ -1036,6 +1043,11 @@ static void mbConfirm(void) {
             if (!matched) echoFmt("No command: %s", name);
             return;
         }
+        case MBI_SWITCH_BUFFER: {
+            bool matched = mb_len > 0 && scriptSwitchBufferByName((const unsigned char *)mb_input, mb_len);
+            if (!matched) echoFmt("No such buffer: %.*s", (int)mb_len, mb_input);
+            break;
+        }
         default: break;
     }
     mbClose();
@@ -1043,7 +1055,20 @@ static void mbConfirm(void) {
 
 static void handleMinibuffer(bool ctrl) {
     if (mb_kind == MB_CHAR_QUERY) {
-        // currently only the quit question
+        if (mb_intent == MBI_KILL_BUFFER) {
+            if (platformKeyPressed(GLFW_KEY_Y) || platformKeyPressed(GLFW_KEY_S)) {
+                if (saveFile()) { mbClose(); scriptKillCurrentBuffer(); }
+                else { echo("Save failed"); mbClose(); }
+            } else if (platformKeyPressed(GLFW_KEY_N)) {
+                mbClose();
+                scriptKillCurrentBuffer();
+            } else if (platformKeyPressed(GLFW_KEY_C) || platformKeyPressed(GLFW_KEY_ESCAPE) ||
+                       (ctrl && platformKeyPressed(GLFW_KEY_G))) {
+                mbClose();
+            }
+            return;
+        }
+        // the quit question
         if (platformKeyPressed(GLFW_KEY_Y) || platformKeyPressed(GLFW_KEY_S)) {
             if (saveFile()) {
                 running = false;
@@ -1226,6 +1251,19 @@ static void applyAction(Action action) {
             echo(wrap ? "Wrap on" : "Wrap off");
             break;
         case ACTION_QUIT: quit_requested = true; break;
+        case ACTION_SWITCH_BUFFER: mbStartPrompt(MBI_SWITCH_BUFFER, "Switch to buffer: ", NULL, 0); break;
+        case ACTION_KILL_BUFFER:
+            if (dirty) mbStartQuery(MBI_KILL_BUFFER, "Buffer modified. Save before killing? (y) yes  (n) no  (c) cancel");
+            else scriptKillCurrentBuffer();
+            break;
+        case ACTION_NEXT_BUFFER: scriptNextBuffer(); break;
+        case ACTION_PREV_BUFFER: scriptPrevBuffer(); break;
+        case ACTION_LIST_BUFFERS: help = HELP_BUFFERS; break;
+        case ACTION_SPLIT_RIGHT: scriptSplitRight(); break;
+        case ACTION_SPLIT_BELOW: scriptSplitBelow(); break;
+        case ACTION_OTHER_WINDOW: scriptOtherWindow(); break;
+        case ACTION_DELETE_WINDOW: scriptDeleteWindow(); break;
+        case ACTION_DELETE_OTHER_WINDOWS: scriptDeleteOtherWindows(); break;
         default: break;
     }
 }
@@ -1699,7 +1737,9 @@ static size_t navRowCount(void) {
 // lines, rather than a full-screen overlay.
 static void drawHelp(float char_w, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap) {
     float status_y = win_h - 2 * line_h; // top of the status line
-    size_t content = (help == HELP_NAV) ? navRowCount() : (scriptCommandCount() + 1);
+    size_t content = (help == HELP_NAV) ? navRowCount()
+                    : (help == HELP_COMMANDS) ? (scriptCommandCount() + 1)
+                    : editorBufferCount();
     float pad = line_h * 0.5f;
     float block_h = (float)(content + 2) * line_h + pad * 2;
     float top = status_y - block_h;
@@ -1746,7 +1786,7 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
             drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
             y += line_h;
         }
-    } else {
+    } else if (help == HELP_COMMANDS) {
         drawStr("Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", char_w, x, y, CFG_COLOR_CURSOR);
         y += line_h;
         size_t command_count = scriptCommandCount();
@@ -1771,6 +1811,23 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
         }
         drawStr("Ctrlx3 (triple-tap Ctrl) : type a command", char_w, x, y, CFG_COLOR_GUTTER);
         y += line_h;
+    } else { // HELP_BUFFERS
+        drawStr("Buffers  ('*' = current, '*' after the name = unsaved changes)", char_w, x, y, CFG_COLOR_CURSOR);
+        y += line_h;
+        int current = editorCurrentBufferId();
+        size_t count = editorBufferCount();
+        for (size_t bi = 0; bi < count; bi++) {
+            int id = editorBufferIdAt(bi);
+            if (id < 0) continue;
+            const char *name = editorBufferName(id);
+            bool buf_dirty = false;
+            editorBufferDirty(id, &buf_dirty);
+            int n = snprintf(tmp, tmp_cap, "%s%s%s", id == current ? "* " : "  ",
+                              name ? name : "?", buf_dirty ? " *" : "");
+            if (n < 0) continue;
+            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
+            y += line_h;
+        }
     }
     drawStr("Press any key to close", char_w, x, y, CFG_COLOR_GUTTER);
 }

@@ -1135,3 +1135,28 @@ void scriptCutLine(void) { solveAtom("cut_line"); }
 void scriptCopyLine(void) { solveAtom("copy_line"); }
 void scriptPasteLine(void) { solveAtom("paste_line"); }
 void scriptSelectLine(void) { solveAtom("select_line"); }
+
+// --- buffers/windows UI (src/buffers.pl, src/windows.pl) -------------------
+void scriptOpenFile(const char *path, size_t path_len) {
+    if (!pl) return;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[1] = { prologMkCodeList(pl, path, path_len) };
+    prologSolve(pl, prologMkCompound(pl, "open_file", 1, cargs));
+    prologReset(pl, mark);
+}
+bool scriptSwitchBufferByName(const unsigned char *name, size_t name_len) {
+    if (!pl) return false;
+    size_t mark = prologMark(pl);
+    PlTerm *cargs[1] = { prologMkCodeList(pl, (const char *)name, name_len) };
+    bool ok = prologSolve(pl, prologMkCompound(pl, "switch_buffer_by_name", 1, cargs));
+    prologReset(pl, mark);
+    return ok;
+}
+void scriptKillCurrentBuffer(void) { solveAtom("kill_current_buffer"); }
+void scriptNextBuffer(void) { solveAtom("next_buffer"); }
+void scriptPrevBuffer(void) { solveAtom("prev_buffer"); }
+void scriptSplitRight(void) { solveAtom("split_right"); }
+void scriptSplitBelow(void) { solveAtom("split_below"); }
+void scriptOtherWindow(void) { solveAtom("other_window"); }
+void scriptDeleteWindow(void) { solveAtom("delete_window"); }
+void scriptDeleteOtherWindows(void) { solveAtom("delete_other_windows"); }
