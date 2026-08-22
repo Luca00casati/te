@@ -371,6 +371,19 @@ static bool nTeCopyRange(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return true;
 }
 
+// --- buffers (src/buffers.pl) ----------------------------------------------
+// Buffer create/list/switch/kill land as native predicates in a later
+// commit; te_current_buffer/1 comes first since src/buffers.pl's
+// blocal_get/2 and blocal_set/2 (and the reparameterized undo/search
+// singleton facts built on top of them -- src/movement.pl's goal-column
+// tracking deliberately stays untouched, see buffers.pl's own comment on
+// why) need a buffer id to key on even while there's still only ever the
+// one bootstrap buffer.
+static bool nTeCurrentBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkInt(p, (long)editorCurrentBufferId()));
+}
+
 // --- lifecycle --------------------------------------------------------
 
 static char plDir[4096];
@@ -462,6 +475,7 @@ static bool scriptSetup(void) {
     prologRegisterNative(pl, "te_buffer_range", 3, nTeBufferRange, NULL);
     prologRegisterNative(pl, "te_clipboard_get", 1, nTeClipboardGet, NULL);
     prologRegisterNative(pl, "te_copy_range", 2, nTeCopyRange, NULL);
+    prologRegisterNative(pl, "te_current_buffer", 1, nTeCurrentBuffer, NULL);
 
     if (!resolvePlDir(plDir, sizeof plDir)) return false;
     char bootstrapPath[4160];

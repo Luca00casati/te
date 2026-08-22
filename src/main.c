@@ -1882,6 +1882,7 @@ size_t editorWordEndRight(size_t pos) { return wordEndRight(pos); }
 size_t editorViewCols(void) { return view_cols; }
 size_t editorPageLines(void) { return page_lines; }
 size_t editorBufferLen(void) { return len; }
+int editorCurrentBufferId(void) { return selected_window->buf->id; }
 
 int main(int argc, char **argv) {
     bootstrapEditor(); // must run before anything touches the buffer/window macros

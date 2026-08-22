@@ -10,30 +10,33 @@
 % bytes in here as an argument, same as it already hands byte ranges to
 % record_edit/5 in src/undo_history.pl.
 %
-% Facts, single-clause-with-retract/assert (same style as undo_stack/1):
-% match_list holds the current match(Start,End) terms in buffer order;
-% search_index is which one is selected (for "i/N"); search_bad_regex/
-% match_truncated mirror te_find_matches's Result. search_params remembers
-% the session that started the current search (IsRegex, Reverse, Origin);
-% replace_params remembers a query-replace session's pattern/replacement so
-% replace_current_match/1 (no arguments -- called once per Enter in the
-% loop) can re-run it. `last_search` deliberately does NOT live here -- it's
-% minibuffer-adjacent (remembering the last submitted prompt text for
-% empty-Enter repeat), so it stays a plain C static next to mb_input.
+% Buffer-local variables (src/buffers.pl's blocal_get/2, blocal_set/2) --
+% each buffer gets its own independent search/replace session state, same
+% as its own undo history (src/undo_history.pl). match_list holds the
+% current match(Start,End) terms in buffer order; search_index is which one
+% is selected (for "i/N"); search_bad_regex/match_truncated mirror
+% te_find_matches's Result. search_params remembers the session that
+% started the current search (IsRegex, Reverse, Origin), stored as one
+% params/3 compound since a buffer-local variable is a single value, not an
+% arglist; replace_params (params/4) remembers a query-replace session's
+% pattern/replacement so replace_current_match/1 (no arguments -- called
+% once per Enter in the loop) can re-run it. `last_search` deliberately does
+% NOT live here -- it's minibuffer-adjacent (remembering the last submitted
+% prompt text for empty-Enter repeat), so it stays a plain C static next to
+% mb_input. See buffers.pl's default_blocal/2 for each key's starting value.
 
-match_list([]).
-search_index(0).
-search_bad_regex(false).
-match_truncated(false).
-search_params(false, false, 0).       % IsRegex, Reverse, Origin
-replace_params([], [], false, false). % PatternCodes, ReplacementCodes, IsRegex, AllMode
-
-set_match_list(L) :- retract(match_list(_)), assertz(match_list(L)).
-set_search_index(I) :- retract(search_index(_)), assertz(search_index(I)).
-set_bad_regex(B) :- retract(search_bad_regex(_)), assertz(search_bad_regex(B)).
-set_truncated(T) :- retract(match_truncated(_)), assertz(match_truncated(T)).
-set_search_params(R, Rev, O) :- retract(search_params(_, _, _)), assertz(search_params(R, Rev, O)).
-set_replace_params(F, T, R, A) :- retract(replace_params(_, _, _, _)), assertz(replace_params(F, T, R, A)).
+match_list(L) :- blocal_get(match_list, L).
+set_match_list(L) :- blocal_set(match_list, L).
+search_index(I) :- blocal_get(search_index, I).
+set_search_index(I) :- blocal_set(search_index, I).
+search_bad_regex(B) :- blocal_get(search_bad_regex, B).
+set_bad_regex(B) :- blocal_set(search_bad_regex, B).
+match_truncated(T) :- blocal_get(match_truncated, T).
+set_truncated(T) :- blocal_set(match_truncated, T).
+search_params(R, Rev, O) :- blocal_get(search_params, params(R, Rev, O)).
+set_search_params(R, Rev, O) :- blocal_set(search_params, params(R, Rev, O)).
+replace_params(F, T, R, A) :- blocal_get(replace_params, params(F, T, R, A)).
+set_replace_params(F, T, R, A) :- blocal_set(replace_params, params(F, T, R, A)).
 
 % Where the current search/replace session began -- main.c reads this back
 % to restore the caret on an aborted (Esc) search prompt.

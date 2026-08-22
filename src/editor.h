@@ -137,4 +137,11 @@ size_t editorPageLines(void);
 // is needed (e.g. move-buffer-end, select-all).
 size_t editorBufferLen(void);
 
+// --- buffers (src/buffers.pl) ----------------------------------------------
+// The selected window's buffer's id -- stable for the buffer's lifetime,
+// Prolog-facing identity for buffer-local variables (src/buffers.pl's
+// blocal_get/2, blocal_set/2) and, once buffer create/switch/kill land as
+// native predicates, everything else that needs to name a specific buffer.
+int editorCurrentBufferId(void);
+
 #endif // TE_EDITOR_H

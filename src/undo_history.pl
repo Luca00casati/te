@@ -6,26 +6,23 @@
 % do. te-specific (uses te_* natives), so it doesn't belong in the
 % editor-agnostic src/bootstrap.pl -- consulted from scriptSetup instead.
 %
-% Each stack is the single argument of a fact (undo_stack([...])), a list
-% of entry(Pos, Removed, Inserted, CurBefore, CurAfter) terms, newest first.
-% Exactly one clause of undo_stack/1 (and redo_stack/1) exists at any time,
-% maintained by always retracting the old one before asserting the new one
-% -- so clearing history is just as simple a retract+assertz, no retractall
-% needed.
-
-undo_stack([]).
-redo_stack([]).
+% Each stack is a buffer-local variable (src/buffers.pl's blocal_get/2,
+% blocal_set/2) holding a list of entry(Pos, Removed, Inserted, CurBefore,
+% CurAfter) terms, newest first -- buffer-local rather than a single global
+% fact so each buffer gets its own independent undo history (see
+% default_blocal(undo_stack, [])/default_blocal(redo_stack, []) in
+% buffers.pl for the empty-buffer starting state).
 
 record_edit(Pos, Removed, Inserted, CurBefore, CurAfter) :-
-    retract(undo_stack(Stack)),
-    retract(redo_stack(_)), assertz(redo_stack([])), % a new edit invalidates redo
+    blocal_get(undo_stack, Stack),
+    blocal_set(redo_stack, []), % a new edit invalidates redo
     ( coalesce(Stack, Pos, Removed, Inserted, CurAfter, NewStack)
     -> true
     ;  te_undo_depth(Depth), length(Stack, Len),
        ( Len >= Depth -> trim_last(Stack, Trimmed) ; Trimmed = Stack ),
        NewStack = [entry(Pos, Removed, Inserted, CurBefore, CurAfter) | Trimmed]
     ),
-    assertz(undo_stack(NewStack)).
+    blocal_set(undo_stack, NewStack).
 
 % Coalesce a run of single-character typing (no deletion, exactly one
 % inserted char, not a newline, immediately after the previous entry's
@@ -43,27 +40,27 @@ trim_last([X|Xs], [X|Ys]) :- trim_last(Xs, Ys).
 % Undo: put Removed back where Inserted currently is, restore the
 % pre-edit cursor, and move this entry to the redo stack.
 undo_step :-
-    retract(undo_stack([entry(Pos, Removed, Inserted, CurBefore, CurAfter)|Rest])),
+    blocal_get(undo_stack, [entry(Pos, Removed, Inserted, CurBefore, CurAfter)|Rest]),
     length(Inserted, InsLen), End is Pos + InsLen,
     te_replace_range(Pos, End, Removed),
     te_set_cursor(CurBefore),
-    assertz(undo_stack(Rest)),
-    retract(redo_stack(RStack)),
-    assertz(redo_stack([entry(Pos, Removed, Inserted, CurBefore, CurAfter) | RStack])).
+    blocal_set(undo_stack, Rest),
+    blocal_get(redo_stack, RStack),
+    blocal_set(redo_stack, [entry(Pos, Removed, Inserted, CurBefore, CurAfter) | RStack]).
 
 % Redo: re-apply Inserted where Removed currently is, restore the
 % post-edit cursor, and move this entry back to the undo stack.
 redo_step :-
-    retract(redo_stack([entry(Pos, Removed, Inserted, CurBefore, CurAfter)|Rest])),
+    blocal_get(redo_stack, [entry(Pos, Removed, Inserted, CurBefore, CurAfter)|Rest]),
     length(Removed, RemLen), End is Pos + RemLen,
     te_replace_range(Pos, End, Inserted),
     te_set_cursor(CurAfter),
-    assertz(redo_stack(Rest)),
-    retract(undo_stack(UStack)),
-    assertz(undo_stack([entry(Pos, Removed, Inserted, CurBefore, CurAfter) | UStack])).
+    blocal_set(redo_stack, Rest),
+    blocal_get(undo_stack, UStack),
+    blocal_set(undo_stack, [entry(Pos, Removed, Inserted, CurBefore, CurAfter) | UStack]).
 
-undo_stack_empty :- undo_stack([]).
+undo_stack_empty :- blocal_get(undo_stack, []).
 
 clear_history :-
-    retract(undo_stack(_)), assertz(undo_stack([])),
-    retract(redo_stack(_)), assertz(redo_stack([])).
+    blocal_set(undo_stack, []),
+    blocal_set(redo_stack, []).
