@@ -15,7 +15,7 @@ const unsigned char *editorGetText(size_t *out_len);
 size_t editorGetCursor(void);
 void editorSetCursor(size_t pos);
 // The other end of the current selection (== cursor when there's no
-// selection) -- src/search.pl reads this alongside the cursor to tell
+// selection) -- scripts/search.pl reads this alongside the cursor to tell
 // whether the current selection *is* a particular match, for stepping
 // next/prev relative to "the match currently selected" vs. "nothing
 // selected yet, jump from the raw cursor position" (see editorSetSelection,
@@ -38,39 +38,39 @@ bool editorGetMarkActive(void);
 // BINDINGS loop did inline.
 void editorSetSelExtend(bool extend);
 
-// Raw byte-level buffer splice, no undo bookkeeping -- src/undo_history.pl
+// Raw byte-level buffer splice, no undo bookkeeping -- scripts/undo_history.pl
 // is the only caller (via te_replace_range/3), for undo_step/redo_step
 // actually applying a stored edit record. Mirrors the existing static
 // replaceRange in main.c exactly.
 void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
-// CFG_UNDO_DEPTH (src/config.h), exposed so src/undo_history.pl's eviction
+// CFG_UNDO_DEPTH (src/config.h), exposed so scripts/undo_history.pl's eviction
 // cap has one source of truth instead of a second copy of the number.
 size_t editorUndoDepth(void);
 
 // Selects [anchorPos, cursorPos) as the current match/selection span: sets
 // both anchor and cursor and resets the cursor-blink clock -- exactly what
 // the old static gotoMatch did (the goal-column reset it also did is now
-// src/search.pl's goto_match/1 calling src/movement.pl's clear_goal_col
+// scripts/search.pl's goto_match/1 calling scripts/movement.pl's clear_goal_col
 // directly, since goal-column state lives in Prolog facts now). Distinct
 // from editorSetCursor, which doesn't touch anchor.
 void editorSetSelection(size_t anchor_pos, size_t cursor_pos);
 // Applies a replacement through the real edit() primitive (undo-recording,
 // same as typing), for an arbitrary [start, end) range rather than the
-// current cursor/selection -- src/search.pl's replace-all/query-replace use
+// current cursor/selection -- scripts/search.pl's replace-all/query-replace use
 // this so every applied match gets its own undo step for free, the same way
 // ordinary typing does. Distinct from editorReplaceRange, which is
 // undo-free and reserved for undo_step/redo_step themselves.
 void editorApplyReplace(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
 // Copies text[start,end) to the system clipboard, no-op if end <= start --
 // mirrors the old static copyRange exactly. Kept native (rather than routing
-// a substring through Prolog as a code list, the way src/editing.pl's
+// a substring through Prolog as a code list, the way scripts/editing.pl's
 // swap_line does for single-line-sized reads) since a selection can span the
 // whole buffer (e.g. select-all then copy).
 void editorCopyRange(size_t start, size_t end);
 
-// --- search (src/search.pl) -------------------------------------------------
+// --- search (scripts/search.pl) -------------------------------------------------
 // PCRE2 (regex) and memmem (literal) are C-only, so the actual pattern
-// matching stays a native primitive; src/search.pl is the decision logic on
+// matching stays a native primitive; scripts/search.pl is the decision logic on
 // top (which match is selected, next/prev, replace-all's ordering). Also
 // used directly by main.c's headless `--regex` grep path, which runs before
 // any Prolog engine exists -- editorFindMatches must not depend on one.
@@ -96,11 +96,11 @@ bool editorRegexSubstitute(const unsigned char *pattern, size_t pattern_len,
                            const unsigned char *replacement, size_t replacement_len,
                            const unsigned char **out, size_t *out_len);
 
-// --- movement (src/movement.pl) -------------------------------------------
+// --- movement (scripts/movement.pl) -------------------------------------------
 // lineStart/lineEnd/colsIn/byteAtCol/visRows are also called every *frame*
 // by rendering/scrolling (wrapped-line layout, scroll-to-cursor, mouse
 // click->text mapping) -- these wrappers don't change that, they just give
-// src/movement.pl a way to call the same pure functions once per keypress,
+// scripts/movement.pl a way to call the same pure functions once per keypress,
 // the same dual-use pattern editorFindMatches/findMatches already has.
 
 // Byte offset of the start/end of the logical line containing `pos`.
@@ -117,7 +117,7 @@ size_t editorVisRows(size_t line_cols, size_t cols);
 
 // One codepoint left/right of `pos`, skipping UTF-8 continuation bytes --
 // pure position in/out versions of the old moveLeft/moveRight (which
-// mutated the cursor directly); src/movement.pl decides what to do with
+// mutated the cursor directly); scripts/movement.pl decides what to do with
 // the result.
 size_t editorStepLeft(size_t pos);
 size_t editorStepRight(size_t pos);
@@ -137,16 +137,16 @@ size_t editorPageLines(void);
 // is needed (e.g. move-buffer-end, select-all).
 size_t editorBufferLen(void);
 
-// --- buffers (src/buffers.pl) ----------------------------------------------
+// --- buffers (scripts/buffers.pl) ----------------------------------------------
 // The selected window's buffer's id -- stable for the buffer's lifetime,
-// Prolog-facing identity for buffer-local variables (src/buffers.pl's
+// Prolog-facing identity for buffer-local variables (scripts/buffers.pl's
 // blocal_get/2, blocal_set/2) and everything below that needs to name a
 // specific buffer.
 int editorCurrentBufferId(void);
 
 // Structural buffer operations -- memory-safety-bearing (create/free a
 // Buffer, keep every Window's `buf` pointer valid), so these stay native
-// rather than Prolog; src/buffers.pl is the policy on top (switch_buffer/1,
+// rather than Prolog; scripts/buffers.pl is the policy on top (switch_buffer/1,
 // open_file/1's reuse-if-already-open, next_buffer/0, kill_buffer/1).
 int editorBufferCreate(void); // a blank scratch buffer, no file
 // Reads `path` into a *new* buffer (like the old single-buffer openPath: a
@@ -165,7 +165,7 @@ bool editorBufferFilename(int id, const char **out_path, bool *out_has_file);
 bool editorBufferDirty(int id, bool *out);
 bool editorBufferSave(int id);
 
-// --- windows (src/windows.pl) -----------------------------------------------
+// --- windows (scripts/windows.pl) -----------------------------------------------
 int editorSelectedWindowId(void);
 bool editorSelectWindow(int id);
 int editorWindowBufferId(int win_id);

@@ -29,12 +29,12 @@ all: te
 build:
 	mkdir -p build
 
-# te's own src/*.pl files (bootstrap.pl, default_bindings.pl, and whatever
-# else is under src/) are read from disk at startup, not baked into the
-# binary -- see script.c's resolvePlDir/scriptSetup. Nothing to generate
-# here; they just need to exist on disk next to the built `te` (or ./src
-# relative to the working directory, which is what the test binary in
-# build/ falls back to).
+# te's own scripts/*.pl files (bootstrap.pl, default_bindings.pl, and
+# whatever else is under scripts/) are read from disk at startup, not baked
+# into the binary -- see script.c's resolvePlDir/scriptSetup. Nothing to
+# generate here; they just need to exist on disk next to the built `te` (or
+# ./scripts relative to the working directory, which is what the test binary
+# in build/ falls back to).
 
 build/main.o: src/main.c | build
 	$(CC) $(TE_CFLAGS) -c $< -o $@

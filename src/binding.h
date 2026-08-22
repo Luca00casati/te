@@ -1,4 +1,4 @@
-// Key bindings live as Prolog facts now (src/default_bindings.pl,
+// Key bindings live as Prolog facts now (scripts/default_bindings.pl,
 // key_binding/3, key_binding_once/3, leader_binding/3), not as static
 // tables here -- see src/script.c for the dispatch. This header keeps what
 // both native C code and the Prolog integration still need: the `Action`
@@ -60,13 +60,13 @@ typedef enum {
     ACTION_REPLACE_ALL_REGEX,     // replace every regex match at once (command only)
     ACTION_TOGGLE_WRAP,           // soft line wrapping on/off
     ACTION_QUIT,
-    // buffers (src/buffers.pl)
+    // buffers (scripts/buffers.pl)
     ACTION_SWITCH_BUFFER,         // prompt for a buffer name in the minibuffer
     ACTION_KILL_BUFFER,           // close the current buffer (prompts to save first if dirty)
     ACTION_NEXT_BUFFER,
     ACTION_PREV_BUFFER,
     ACTION_LIST_BUFFERS,          // overlay listing every open buffer
-    // windows (src/windows.pl)
+    // windows (scripts/windows.pl)
     ACTION_SPLIT_RIGHT,
     ACTION_SPLIT_BELOW,
     ACTION_OTHER_WINDOW,          // cycle focus to the next pane
@@ -110,7 +110,7 @@ static inline bool modMatchesChord(Mod mod, bool shift) {
 // and/or typeable as a named command (leader, then the name + Enter) --
 // those are two different things that happen to share this one table:
 // *every* action has a name here (so any key_binding/leader_binding fact in
-// src/default_bindings.pl, or a user's init.pl, can reach any action via
+// scripts/default_bindings.pl, or a user's init.pl, can reach any action via
 // te_action), but only a curated subset is also asserted as a command/2
 // fact in default_bindings.pl (the same subset COMMANDS covered before this
 // table existed) -- so what's typeable at the command prompt is unchanged.

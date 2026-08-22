@@ -132,7 +132,7 @@ static void test_insert_replaces_selection(void) {
     CHECK(anchor == 2);
 }
 
-// deleteBack/deleteForward/deleteSelection's logic moved into src/editing.pl
+// deleteBack/deleteForward/deleteSelection's logic moved into scripts/editing.pl
 // (delete_back/delete_forward, both routing through delete_selection when
 // there's a selection) -- exercise it through runAction, same as
 // test_word_movement below does for movement.pl.
@@ -179,7 +179,7 @@ static void test_deleteSelection(void) {
     CHECK(cursor == 1);
 }
 
-// open_line_below/open_line_above (src/editing.pl): both insert a single
+// open_line_below/open_line_above (scripts/editing.pl): both insert a single
 // newline, but land the cursor differently -- below, after it (on the new
 // blank line, same as te_apply_replace's own default); above, an explicit
 // te_set_cursor override puts it *before* the newline, onto the fresh blank
@@ -265,7 +265,7 @@ static void test_line_boundaries(void) {
     CHECK(lineStartOfRow(2) == 8);
 }
 
-// currentLineSpan's logic moved into src/editing.pl (current_line_span,
+// currentLineSpan's logic moved into scripts/editing.pl (current_line_span,
 // used by select_line/cut_line/copy_line) -- exercise it through
 // ACTION_SELECT_LINE, which sets anchor/cursor to exactly that span.
 static void test_selectLine(void) {
@@ -285,7 +285,7 @@ static void test_cursorLineCol(void) {
     CHECK(lc.line == 1 && lc.col == 1);
 }
 
-// swapLine's logic moved into src/editing.pl (swap_line_down/swap_line_up,
+// swapLine's logic moved into scripts/editing.pl (swap_line_down/swap_line_up,
 // via move_line_down/move_line_up) -- exercise it through runAction.
 static void test_swapLine_down_and_up(void) {
     setText("one\ntwo\nthree");
@@ -297,7 +297,7 @@ static void test_swapLine_down_and_up(void) {
     CHECK(textEquals("one\ntwo\nthree"));
 }
 
-// move_line_left/move_line_right (src/editing.pl): outdent removes one
+// move_line_left/move_line_right (scripts/editing.pl): outdent removes one
 // leading space/tab (a no-op if the line doesn't start with one), indent
 // always adds one leading space; both keep the cursor's position relative
 // to the rest of the line rather than te_apply_replace's own default.
@@ -322,7 +322,7 @@ static void test_moveLineLeftRight(void) {
 
 // --- word movement -----------------------------------------------------
 // moveWordStartRight/moveWordEndRight/moveWordStartLeft's logic moved into
-// src/movement.pl (move_word_start_right/move_word_end_right/
+// scripts/movement.pl (move_word_start_right/move_word_end_right/
 // move_word_start_left) -- exercise it through the public runAction entry
 // point, same as production code does.
 static void test_word_movement(void) {
@@ -344,7 +344,7 @@ static void test_word_movement(void) {
     CHECK(cursor == 4); // start of "bar"
 }
 
-// moveLeft/moveRight's logic moved into src/movement.pl (move_left/
+// moveLeft/moveRight's logic moved into scripts/movement.pl (move_left/
 // move_right) -- exercise it through runAction, same as above.
 static void test_moveLeft_moveRight_utf8(void) {
     unsigned char enc[4];
@@ -386,7 +386,7 @@ static void test_findMatches_bad_regex(void) {
     CHECK(match_count == 0);
 }
 
-// goto_match itself lives in src/search.pl now (reached via
+// goto_match itself lives in scripts/search.pl now (reached via
 // scriptSearchUpdate/scriptSearchStep) -- exercise it end to end via the
 // public anchor/cursor state, the same thing the old gotoMatch set.
 static void test_gotoMatch(void) {
@@ -472,10 +472,10 @@ static void test_read_missing_file(void) {
     CHECK(len == 0); // readFileInto resets len on failure
 }
 
-// --- multi-buffer (main.c's Buffer/Window, src/buffers.pl) ---------------
+// --- multi-buffer (main.c's Buffer/Window, scripts/buffers.pl) ---------------
 // Structural round-trip: create a second buffer, switch the (one, so far)
 // window to it, then kill it and confirm the window falls back to the
-// original -- the native layer src/buffers.pl's switch_buffer/kill_buffer
+// original -- the native layer scripts/buffers.pl's switch_buffer/kill_buffer
 // will wrap once the window/buffer natives get UI wiring.
 static void test_buffer_create_switch_kill(void) {
     int b1 = editorCurrentBufferId();
@@ -497,7 +497,7 @@ static void test_buffer_create_switch_kill(void) {
 
 // Two live buffers must never see each other's content, dirty flag, or
 // undo history -- the whole point of moving undo/search state to
-// buffer-local variables (src/buffers.pl) rather than global facts.
+// buffer-local variables (scripts/buffers.pl) rather than global facts.
 static void test_buffer_isolation(void) {
     setText("one");
     int b1 = editorCurrentBufferId();
@@ -696,7 +696,7 @@ int main(void) {
     // globals played before this file #included main.c's structural change.
     bootstrapEditor();
 
-    // Undo/redo now goes through the Prolog engine (src/undo_history.pl),
+    // Undo/redo now goes through the Prolog engine (scripts/undo_history.pl),
     // so it needs one alive -- a nonexistent init.pl still loads
     // bootstrap.pl/default_bindings.pl/undo_history.pl, which is all any
     // test below the script-specific ones needs. Torn down again right

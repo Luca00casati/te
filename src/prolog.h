@@ -9,11 +9,11 @@
 // mkCodeList/getTextFlexible in prolog.c), not a distinct string type.
 // A library of list/control predicates (member/2, append/3, maplist/2-4,
 // forall/2, foldl/4, between/3, succ/2, ...) is written as ordinary Prolog
-// clauses (src/bootstrap.pl) rather than hand-coded in C -- most of them
+// clauses (scripts/bootstrap.pl) rather than hand-coded in C -- most of them
 // don't need anything a native C function can do that clauses can't.
 // prologCreate() no longer loads it automatically: it's the caller's job to
 // prologConsultFile/Buffer it in (script.c's scriptSetup does this by
-// finding src/bootstrap.pl on disk next to the running executable).
+// finding scripts/bootstrap.pl on disk next to the running executable).
 // ISO-flavored, not a certified conformance suite.
 #ifndef TE_PROLOG_H
 #define TE_PROLOG_H

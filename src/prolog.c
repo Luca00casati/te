@@ -1077,7 +1077,7 @@ static bool nativeRetract(Prolog *pl, Term **a, int arity, void *ctx) {
 // retract() above only unlinks a Clause node from its predicate's list --
 // `program` is a bump allocator with no free-list, so the node's arena bytes
 // stay allocated. Every "retract this singleton fact, assertz its
-// replacement" update (src/*.pl's mutable-state idiom: undo history,
+// replacement" update (scripts/*.pl's mutable-state idiom: undo history,
 // goal-column tracking, search state, buffer-local variables) would
 // otherwise leak permanently over a long session. This is a copying
 // compaction: walk every predicate's still-live clauses and copy them into
@@ -1341,7 +1341,7 @@ static bool nativeCopyTerm(Prolog *pl, Term **a, int arity, void *ctx) {
 }
 
 // --- ISO type-checking predicates -----------------------------------------
-// Building blocks for Prolog-level library definitions (see src/bootstrap.pl)
+// Building blocks for Prolog-level library definitions (see scripts/bootstrap.pl)
 // as much as user-facing predicates -- e.g. succ/2 is written in Prolog on
 // top of var/1 and integer/1 rather than as a native.
 static bool nativeVar(Prolog *pl, Term **a, int arity, void *ctx) { (void)pl; (void)arity; (void)ctx; return deref(a[0])->tag == T_VAR; }
@@ -1898,9 +1898,9 @@ Prolog *prologCreate(void) {
     pl->atomError = internAtom(pl, "error");
     registerStdlib(pl);
     // The engine's own standard library (between/3, member/2, maplist/2-4,
-    // ...) is written in Prolog, not C -- see src/bootstrap.pl for why and
+    // ...) is written in Prolog, not C -- see scripts/bootstrap.pl for why and
     // what. Loading it is the caller's job now (script.c's scriptSetup finds
-    // and consults src/bootstrap.pl on disk, next to the running executable)
+    // and consults scripts/bootstrap.pl on disk, next to the running executable)
     // -- prologCreate no longer bundles it, so a bare engine with none of
     // that library loaded is a valid (if not very useful) starting point.
     return pl;
@@ -1924,7 +1924,7 @@ void prologDestroy(Prolog *pl) {
 void prologSetErrorHandler(Prolog *pl, PrologErrorFn fn, void *ctx) { pl->errorFn = fn; pl->errorCtx = ctx; }
 
 // Parses and loads clauses/directives from a buffer (used by both
-// prologConsultFile and prologCreate's src/bootstrap.pl library load).
+// prologConsultFile and prologCreate's scripts/bootstrap.pl library load).
 static void consultBuffer(Prolog *pl, const char *buf, size_t len) {
     Parser parser;
     initParser(&parser, pl, buf, len, &pl->query);

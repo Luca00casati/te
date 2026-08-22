@@ -137,13 +137,13 @@ cat notes.txt | ./te --regex '\bTODO\b'      # read stdin
 `te` loads an optional Prolog init script at startup —
 `$XDG_CONFIG_HOME/te/init.pl`, falling back to `~/.config/te/init.pl` —
 the way Emacs loads `.emacs` or Vim loads `init.vim` — **followed by te's
-own `src/default_bindings.pl`**, read from disk next to the executable (see
+own `scripts/default_bindings.pl`**, read from disk next to the executable (see
 "How it works" below). A missing init.pl is fine (te just uses its built-in
 defaults); a script error is echoed on the status line instead of stopping
 `te` from starting. See `docs/init.pl.example` for a starting point.
 
 Bindings, hooks, and commands are plain **facts and rules** — not just for
-`init.pl`, `te`'s own defaults are facts too (`src/default_bindings.pl`),
+`init.pl`, `te`'s own defaults are facts too (`scripts/default_bindings.pl`),
 re-checked fresh every time they're needed rather than registered once as
 an opaque callback, so a clause can be a rule whose body consults live
 editor state, not just a fixed action. Since `init.pl` loads *before* the
@@ -198,13 +198,13 @@ A list/control-predicate library — `member/2`, `memberchk/2`, `append/3`,
 `reverse/2`, `last/2`, `nth0/3`/`nth1/3`, `sum_list/2`, `max_list/2`/
 `min_list/2`, `numlist/3`, `maplist/2-4`, `forall/2`, `include/3`/`exclude/3`,
 `foldl/4`, `delete/3`, `subtract/3`/`intersection/3`/`union/3`, `between/3`,
-`succ/2` — lives in `src/bootstrap.pl`, real Prolog source consulted at
+`succ/2` — lives in `scripts/bootstrap.pl`, real Prolog source consulted at
 startup rather than hand-coded in C: most of them don't need anything a
 native function can do that a recursive clause can't, so the engine
 dogfeeds its own unification/backtracking instead of duplicating that
 logic. Read from disk at startup next to the running executable, the same
 way the bundled font is (see "How it works" below) — a missing
-`src/bootstrap.pl` is treated as fatal, the same as a missing font, since
+`scripts/bootstrap.pl` is treated as fatal, the same as a missing font, since
 it's core engine behavior everything else leans on, not user-swappable
 content. ISO-flavored, not a certified conformance suite.
 
@@ -286,24 +286,24 @@ Two suites, both under `tests/`:
 - **The font is loaded from disk at startup**, from the same directory as the
   running executable. `UnifontExMono.ttf` is bundled in the repo rather than
   embedded into the binary; `te` exits with a clear error if it can't find it.
-  Every `src/*.pl` file (below) is loaded the same way, for the same reason:
+  Every `scripts/*.pl` file (below) is loaded the same way, for the same reason:
   adding or editing one is just a file change, not a rebuild.
 - `src/config.h` — all the tunables (window size, font size, colors, tab,
   buffer capacity). Font size is 16 by default; multiples of 16 stay crisp.
 - `src/binding.h` — the `Action`/`Mod` enums every key ultimately resolves to
   and their human-readable labels; not a key → action map anymore (that's
-  `src/default_bindings.pl` now — see Scripting above). The leader is armed
+  `scripts/default_bindings.pl` now — see Scripting above). The leader is armed
   by a double-tap of Ctrl (`detectCtrlTaps` in `main.c`).
 - `src/prolog.c`/`prolog.h` — the from-scratch Prolog engine (see Scripting
   above): tokenizer, operator-precedence parser, term representation,
   unification, a backtracking CPS solver with cut/catch/throw, and a small
   built-in predicate library. Not editor-specific — doesn't know `te` exists.
-- `src/bootstrap.pl` — the engine's own standard library (`member/2`,
+- `scripts/bootstrap.pl` — the engine's own standard library (`member/2`,
   `maplist/2-4`, `between/3`, `succ/2`, ...), written in Prolog rather than C
   (see Scripting above). `script.c`'s `scriptSetup` finds and consults it
   once, right after `prologCreate` (which no longer loads any library on its
   own) — see `resolvePlDir` below.
-- `src/default_bindings.pl` — te's own key bindings/leader chords/commands,
+- `scripts/default_bindings.pl` — te's own key bindings/leader chords/commands,
   as `key_binding`/`key_binding_once`/`leader_binding`/`command` facts (see
   Scripting above) — what used to be the static `BINDINGS`/`PREFIX_BINDINGS`/
   `COMMANDS` tables in `src/binding.h`. `scriptInit`/`scriptInitFromFile` in
@@ -318,12 +318,12 @@ Two suites, both under `tests/`:
   `handlePrefix` in `main.c` call `scriptHandleKey`/`scriptHandlePrefixKey`
   unconditionally, and `saveFile`/`openPath` call `scriptRunHook` for
   `hook/2` listeners.
-- `src/undo_history.pl` — undo/redo history: what to remember, coalescing a
+- `scripts/undo_history.pl` — undo/redo history: what to remember, coalescing a
   run of typing into one undo step, evicting the oldest entry past
   `CFG_UNDO_DEPTH`, and what undo/redo actually restore. The byte-level
   splice (`te_replace_range/3`) stays native; this is the bookkeeping on top,
   consulted from `scriptSetup` so it's available regardless of `init.pl`.
-- `src/search.pl` — the search/incremental-search/query-replace state
+- `scripts/search.pl` — the search/incremental-search/query-replace state
   machine: which match is selected, next/prev, replace-all's ordering.
   PCRE2 (regex) and `memmem` (literal) stay native (`te_find_matches/3`,
   `te_regex_substitute/5`, wrapping `main.c`'s `findMatches`/
@@ -331,7 +331,7 @@ Two suites, both under `tests/`:
   scanning logic isn't duplicated); this is the decision logic on top. The
   minibuffer widget itself (typing the query, the modal shell) stays in
   `main.c`, which resolves "what's the active query" and passes it in.
-- `src/movement.pl` — cursor movement: left/right/word/home/end/buffer-
+- `scripts/movement.pl` — cursor movement: left/right/word/home/end/buffer-
   start/end, select-all, and goal-column-tracking wrap-aware up/down/
   page-up/down. The raw UTF-8/line/column math stays native (`te_step_left/2`,
   `te_word_start_left/2`, `te_line_start/2`, `te_cols_in/3`,
@@ -341,7 +341,7 @@ Two suites, both under `tests/`:
   top — which direction, how far, and the sticky goal column a run of
   up/down presses tries to keep (`goal_col_set`/`goal_col_val` facts, replacing
   the old C statics of the same name).
-- `src/editing.pl` — insertion/deletion/clipboard/whole-line editing: newline/
+- `scripts/editing.pl` — insertion/deletion/clipboard/whole-line editing: newline/
   open-line-above-or-below/indent, delete back/forward (collapsing a
   selection instead when there is one), copy/cut/paste, and the whole-line
   ops (shift-line indent/outdent, swap line up/down, cut/copy/paste-line,
@@ -354,7 +354,7 @@ Two suites, both under `tests/`:
   cursor to where it belongs when that differs from `te_apply_replace`'s own
   default (the end of what it just spliced in) — e.g. `open-line-above`
   landing on the new blank line rather than after the newline it inserted.
-- `src/buffers.pl` — buffer-local variables (`blocal_get/2`/`blocal_set/2`,
+- `scripts/buffers.pl` — buffer-local variables (`blocal_get/2`/`blocal_set/2`,
   one `blocal(BufId, Key, Value)` fact per buffer/key, replacing what used
   to be global singleton facts) and the switch/open/kill/next/prev-buffer
   policy on top of the native buffer primitives (`te_buffer_create/1`,
@@ -364,10 +364,10 @@ Two suites, both under `tests/`:
   native; this is the decision logic on top, including reusing an
   already-open buffer instead of re-reading it (see Controls above) and
   clearing a killed buffer's own `blocal/3` facts so they don't linger.
-  `src/undo_history.pl` and `src/search.pl` store their per-buffer state
+  `scripts/undo_history.pl` and `scripts/search.pl` store their per-buffer state
   through it now, so opening a second file no longer shares (or clobbers)
   the first one's undo stack or in-progress search.
-- `src/windows.pl` — `split-right`/`split-below`/`other-window`/
+- `scripts/windows.pl` — `split-right`/`split-below`/`other-window`/
   `delete-window`/`delete-other-windows`, thin policy wrappers over the
   native window primitives (`te_window_split/3`, `te_window_close/1`,
   `te_selected_window/1`, `te_select_window/1`, ... in `script.c`). Each

@@ -1,18 +1,18 @@
 // Prolog integration -- see script.h. Registers `te_action/1`, `te_echo/1`,
 // `te_insert/1`, `te_text/1`, `te_cursor/1`, `te_set_cursor/1` as native
 // predicates, and loads the user's init.pl followed by te's own
-// src/default_bindings.pl at startup. Bindings/hooks/commands are ordinary
+// scripts/default_bindings.pl at startup. Bindings/hooks/commands are ordinary
 // facts and rules (key_binding/3, key_binding_once/3, leader_binding/3,
 // hook/2, command/2), re-solved fresh every time they're checked rather
 // than cached from a one-time registration -- see prolog.h's engine and
 // docs/init.pl.example.
 //
 // te's own .pl files (bootstrap.pl, default_bindings.pl, and every other
-// src/*.pl) are read from disk at startup rather than baked into the binary
+// scripts/*.pl) are read from disk at startup rather than baked into the binary
 // -- same as the bundled font, found next to the running executable
-// (resolvePlDir), or a plain "src" relative to the working directory as a
+// (resolvePlDir), or a plain "scripts" relative to the working directory as a
 // fallback (which is what makes the test binary in build/ -- one directory
-// below the real src/ -- work: `make test` always runs with the repo root
+// below the real scripts/ -- work: `make test` always runs with the repo root
 // as its working directory). bootstrap.pl missing is fatal (scriptSetup
 // fails, scriptInit/scriptInitFromFile return false): it's the engine's own
 // standard library, and default_bindings.pl/undo_history.pl/search.pl/
@@ -246,7 +246,7 @@ static bool nTeApplyReplace(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return true;
 }
 
-// --- movement (src/movement.pl) -------------------------------------------
+// --- movement (scripts/movement.pl) -------------------------------------------
 
 static bool getPos(Prolog *p, PlTerm *t, size_t *out) {
     long v;
@@ -327,7 +327,7 @@ static bool nTeBufferLen(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return prologUnify(p, args[0], prologMkInt(p, (long)editorBufferLen()));
 }
 
-// --- editing (src/editing.pl) ----------------------------------------------
+// --- editing (scripts/editing.pl) ----------------------------------------------
 
 static bool nTeTab(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
@@ -371,11 +371,11 @@ static bool nTeCopyRange(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return true;
 }
 
-// --- buffers (src/buffers.pl) ----------------------------------------------
+// --- buffers (scripts/buffers.pl) ----------------------------------------------
 // Buffer create/list/switch/kill land as native predicates in a later
-// commit; te_current_buffer/1 comes first since src/buffers.pl's
+// commit; te_current_buffer/1 comes first since scripts/buffers.pl's
 // blocal_get/2 and blocal_set/2 (and the reparameterized undo/search
-// singleton facts built on top of them -- src/movement.pl's goal-column
+// singleton facts built on top of them -- scripts/movement.pl's goal-column
 // tracking deliberately stays untouched, see buffers.pl's own comment on
 // why) need a buffer id to key on even while there's still only ever the
 // one bootstrap buffer.
@@ -461,7 +461,7 @@ static bool nTeBufferSave(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return editorBufferSave((int)id);
 }
 
-// --- windows (src/windows.pl) -----------------------------------------------
+// --- windows (scripts/windows.pl) -----------------------------------------------
 static bool nTeSelectedWindow(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     return prologUnify(p, args[0], prologMkInt(p, (long)editorSelectedWindowId()));
@@ -487,7 +487,7 @@ static bool nTeWindowSetBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) 
     return editorWindowSetBuffer((int)winId, (int)bufId);
 }
 // Dir is the atom `right` or `below`; anything else fails rather than
-// silently defaulting, so a typo in src/windows.pl surfaces immediately.
+// silently defaulting, so a typo in scripts/windows.pl surfaces immediately.
 static bool nTeWindowSplit(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     (void)arity; (void)ctx;
     long winId;
@@ -528,13 +528,13 @@ static bool nTeWindowDeleteOthers(Prolog *p, PlTerm *args[], int arity, void *ct
 
 static char plDir[4096];
 
-// Finds the directory holding te's own .pl source files: <exe_dir>/src if
-// that exists (matches how loadFontFile in main.c finds the bundled font
+// Finds the directory holding te's own .pl source files: <exe_dir>/scripts
+// if that exists (matches how loadFontFile in main.c finds the bundled font
 // next to the executable -- works regardless of the caller's working
-// directory), else a plain "src" relative to the current directory (the
-// test binary lives in build/, one level below the real src/, but `make
+// directory), else a plain "scripts" relative to the current directory (the
+// test binary lives in build/, one level below the real scripts/, but `make
 // test` always runs with the repo root as its working directory, where a
-// relative "src" resolves correctly).
+// relative "scripts" resolves correctly).
 static bool resolvePlDir(char *out, size_t outsz) {
     char exePath[4096];
     ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
@@ -543,7 +543,7 @@ static bool resolvePlDir(char *out, size_t outsz) {
         char *slash = strrchr(exePath, '/');
         if (slash) {
             char candidate[4160];
-            snprintf(candidate, sizeof candidate, "%.*s/src", (int)(slash - exePath), exePath);
+            snprintf(candidate, sizeof candidate, "%.*s/scripts", (int)(slash - exePath), exePath);
             struct stat st;
             if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
                 snprintf(out, outsz, "%s", candidate);
@@ -552,8 +552,8 @@ static bool resolvePlDir(char *out, size_t outsz) {
         }
     }
     struct stat st;
-    if (stat("src", &st) == 0 && S_ISDIR(st.st_mode)) {
-        snprintf(out, outsz, "src");
+    if (stat("scripts", &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(out, outsz, "scripts");
         return true;
     }
     return false;
@@ -887,7 +887,7 @@ bool scriptCommandGet(size_t i, const char **name) {
     return true;
 }
 
-// --- undo/redo history (src/undo_history.pl) ------------------------------
+// --- undo/redo history (scripts/undo_history.pl) ------------------------------
 // removed/inserted are arbitrary buffer bytes, so these are built via
 // prologMkCompound/prologMkInt/prologMkCodeList rather than a parsed goal
 // string -- same injection-safety reasoning as scriptRunCommand.
@@ -936,7 +936,7 @@ void scriptClearHistory(void) {
     prologReset(pl, mark);
 }
 
-// --- search/replace (src/search.pl) ---------------------------------------
+// --- search/replace (scripts/search.pl) ---------------------------------------
 
 static PlTerm *mkBool(Prolog *p, bool b) { return prologMkAtom(p, b ? "true" : "false"); }
 
@@ -1076,7 +1076,7 @@ void scriptClearSearch(void) {
     prologReset(pl, mark);
 }
 
-// --- cursor movement (src/movement.pl) ------------------------------------
+// --- cursor movement (scripts/movement.pl) ------------------------------------
 
 static void solveAtom(const char *name) {
     if (!pl) return;
@@ -1117,7 +1117,7 @@ void scriptPageDown(bool wrap, size_t cols, size_t lines) {
     prologReset(pl, mark);
 }
 
-// --- editing (src/editing.pl) -----------------------------------------------
+// --- editing (scripts/editing.pl) -----------------------------------------------
 void scriptNewline(void) { solveAtom("newline"); }
 void scriptOpenLineBelow(void) { solveAtom("open_line_below"); }
 void scriptOpenLineAbove(void) { solveAtom("open_line_above"); }
@@ -1136,7 +1136,7 @@ void scriptCopyLine(void) { solveAtom("copy_line"); }
 void scriptPasteLine(void) { solveAtom("paste_line"); }
 void scriptSelectLine(void) { solveAtom("select_line"); }
 
-// --- buffers/windows UI (src/buffers.pl, src/windows.pl) -------------------
+// --- buffers/windows UI (scripts/buffers.pl, scripts/windows.pl) -------------------
 void scriptOpenFile(const char *path, size_t path_len) {
     if (!pl) return;
     size_t mark = prologMark(pl);

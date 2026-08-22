@@ -7,7 +7,7 @@
 % they're needed (not registered once as an opaque callback) -- so a
 % key_binding/leader_binding/hook clause can be a rule whose body consults
 % live editor state via te_text/1 etc., not just a fixed action. te's own
-% defaults (src/default_bindings.pl) are facts too, loaded right after this
+% defaults (scripts/default_bindings.pl) are facts too, loaded right after this
 % file -- a fact here at the same key/mod/name is tried first and wins.
 
 % key_binding(Key, Mod, Handler): Key is a single-character atom (g, 3) or
@@ -24,7 +24,7 @@ key_binding(g, ctrl_shift, te_action("select-all")).
 
 % Handler can also point at a plain existing action directly, as a shortcut
 % for a one-clause rule. Note: this overrides the matching built-in from
-% src/default_bindings.pl at the same key/mod, since this file loads first.
+% scripts/default_bindings.pl at the same key/mod, since this file loads first.
 key_binding(t, ctrl_shift, te_action("toggle-wrap")).
 
 % A custom handler predicate can read/write the buffer directly: te_text/1
@@ -65,7 +65,7 @@ announce_save :-
 
 % te ships a small list/control library written in Prolog itself, not C --
 % member/2, append/3, maplist/2-4, forall/2, foldl/4, between/3, succ/2, and
-% more (see src/bootstrap.pl). A few of them put to use:
+% more (see scripts/bootstrap.pl). A few of them put to use:
 
 % between/3 + forall/2: insert a 5-item numbered list template.
 key_binding(l, ctrl_shift, insert_numbered_list).

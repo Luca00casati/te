@@ -34,7 +34,7 @@ static bool solveText(Prolog *pl, const char *src) {
     return ok;
 }
 
-// Regression test for src/bootstrap.pl's retractall/1: the textbook
+// Regression test for scripts/bootstrap.pl's retractall/1: the textbook
 // `retract(X), fail` loop doesn't work in this engine (retract/1 is a
 // single-shot native, not a backtrackable generator, and a successful match
 // leaves bindings on X that would corrupt a general pattern on any further
@@ -43,7 +43,7 @@ static bool solveText(Prolog *pl, const char *src) {
 static void test_retractall(void) {
     Prolog *pl = prologCreate();
     prologSetErrorHandler(pl, onError, NULL);
-    prologConsultFile(pl, "src/bootstrap.pl");
+    prologConsultFile(pl, "scripts/bootstrap.pl");
     CHECK(solveText(pl, "assertz(foo(1))"));
     CHECK(solveText(pl, "assertz(foo(2))"));
     CHECK(solveText(pl, "assertz(foo(3))"));
@@ -70,8 +70,8 @@ static void test_assert_retract_roundtrip(void) {
 // compactProgram, triggered from prologReset once retracts accumulate past
 // PROLOG_COMPACT_RETRACT_INTERVAL): repeatedly retract a singleton fact and
 // assert its replacement -- the exact "mutable state" idiom src/undo_
-// history.pl, src/search.pl, src/movement.pl, and (once buffer-local
-// variables land) src/buffers.pl all use. Without the fix, `program` grows
+// history.pl, scripts/search.pl, scripts/movement.pl, and (once buffer-local
+// variables land) scripts/buffers.pl all use. Without the fix, `program` grows
 // by roughly one leaked clause per iteration (retract unlinks but never
 // frees); with it, growth is bounded by compaction kicking in periodically.
 static void test_retract_does_not_leak_program_arena(void) {

@@ -189,7 +189,7 @@ static void bootstrapEditor(void) {
     root_window = selected_window = windowCreateLeaf(bufferCreate());
 }
 
-// Sticky/goal column for vertical movement now lives in src/movement.pl
+// Sticky/goal column for vertical movement now lives in scripts/movement.pl
 // (goal_col_set/1, goal_col_val/1) -- a run of up/down moves tries to keep
 // the same on-screen column; any other action clears it (scriptClearGoalColumn).
 static bool shift = false;
@@ -249,7 +249,7 @@ static double echo_time = -100;
 // Minibuffer-adjacent search/replace state that bridges the multi-step
 // prompt flow (mbConfirm) -- the actual search/replace *decision* state
 // (which match is selected, session is_regex/reverse/origin, ...) lives in
-// src/search.pl now (see scriptStartSearch/scriptSearchUpdate/etc.).
+// scripts/search.pl now (see scriptStartSearch/scriptSearchUpdate/etc.).
 static char last_search[256];
 static size_t last_search_len = 0;
 static bool replace_is_regex = false;
@@ -259,7 +259,7 @@ static size_t replace_from_len = 0;
 static char replace_to_buf[4096];
 static size_t replace_to_len = 0;
 static unsigned char one_rep_buf[8192]; // scratch for a single regex substitution
-// Scratch space for findMatches (shared by src/search.pl's te_find_matches
+// Scratch space for findMatches (shared by scripts/search.pl's te_find_matches
 // native and grep()'s headless --regex path, so the PCRE2/memmem scanning
 // isn't duplicated between the two -- see editorFindMatches/editorMatchGet).
 #define MAX_MATCHES 8192
@@ -270,7 +270,7 @@ static bool match_truncated = false;
 static bool search_bad_regex = false;
 
 // ---------------------------------------------------------------------------
-// Undo / redo: the history itself (src/undo_history.pl) and the raw buffer
+// Undo / redo: the history itself (scripts/undo_history.pl) and the raw buffer
 // splice (replaceRange) are the only pieces left in C -- see edit()/doUndo()/
 // doRedo() below.
 // ---------------------------------------------------------------------------
@@ -374,7 +374,7 @@ static void replaceRange(size_t start, size_t end, const unsigned char *bytes, s
 // bytes must be captured (via scriptRecordEdit, which copies them into its
 // own Prolog term representation immediately) *before* replaceRange
 // overwrites them -- no local malloc'd copy needed anymore, script.c's
-// src/undo_history.pl owns the history bookkeeping (coalescing a run of
+// scripts/undo_history.pl owns the history bookkeeping (coalescing a run of
 // typing, evicting the oldest entry past the depth cap, clearing redo).
 static void edit(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
     if (len - (end - start) + bytes_len > TEXT_CAP) return;
@@ -394,7 +394,7 @@ static void insertBytes(const unsigned char *bytes, size_t n) {
 }
 // --- undo / redo -----------------------------------------------------------
 // The history (coalescing, eviction, what undo/redo actually restore) lives
-// in src/undo_history.pl now; these just keep the cursor/dirty/echo
+// in scripts/undo_history.pl now; these just keep the cursor/dirty/echo
 // bookkeeping that isn't history storage, mirroring the old messages exactly.
 static void doUndo(void) {
     if (!scriptUndo()) {
@@ -418,7 +418,7 @@ static void freeHistory(void) { scriptClearHistory(); }
 
 // --- cursor movement primitives (pure: position in, position out; the
 // decision of what to do with the result -- collapse/extend selection,
-// goal-column bookkeeping -- lives in src/movement.pl now) ------------------
+// goal-column bookkeeping -- lives in scripts/movement.pl now) ------------------
 static size_t stepLeft(size_t pos) {
     if (pos == 0) return pos;
     pos--;
@@ -739,7 +739,7 @@ static void saveCurrent(void) {
 // --- search ----------------------------------------------------------------
 // Collect every match of `query` into match_starts/match_lens. Literal unless
 // is_regex, in which case query is a PCRE2 pattern. Shared by editorFindMatches
-// (src/search.pl's te_find_matches/4) and grep()'s headless --regex path, so
+// (scripts/search.pl's te_find_matches/4) and grep()'s headless --regex path, so
 // the PCRE2/memmem scanning logic isn't duplicated between the two. Returns
 // false if the pattern failed to compile (regex only).
 static bool findMatches(const unsigned char *query, size_t query_len, bool is_regex) {
@@ -797,7 +797,7 @@ static bool findMatches(const unsigned char *query, size_t query_len, bool is_re
 }
 // The query currently being searched: the live prompt text, else the last
 // one -- minibuffer-adjacent (mb_input/last_search), so this stays here
-// rather than moving into src/search.pl.
+// rather than moving into scripts/search.pl.
 static const unsigned char *activeQueryPtr(size_t *out_len) {
     if (mb_kind == MB_TEXT_PROMPT && mb_intent == MBI_SEARCH && mb_len > 0) {
         *out_len = mb_len;
@@ -807,7 +807,7 @@ static const unsigned char *activeQueryPtr(size_t *out_len) {
     return (const unsigned char *)last_search;
 }
 // Echoes the live "Match i/N[+]" status (or why there isn't one) from
-// src/search.pl's current state -- shared by every function below that
+// scripts/search.pl's current state -- shared by every function below that
 // jumps to a match.
 static void echoMatchStatus(void) {
     size_t index, count; bool truncated, bad_regex;
@@ -984,7 +984,7 @@ static void mbComplete(void) {
 static void mbConfirm(void) {
     switch (mb_intent) {
         case MBI_FIND_FILE:
-            // open_file/1 (src/buffers.pl): reuses an already-open buffer for
+            // open_file/1 (scripts/buffers.pl): reuses an already-open buffer for
             // this path instead of re-reading it -- a real behavior change
             // from the old always-clobber-the-current-buffer openPath call
             // this replaced (see README).
@@ -1501,7 +1501,7 @@ static void handleInput(bool ctrl, Metrics m) {
             }
         }
     }
-    // key_binding/3 + key_binding_once/3 (src/default_bindings.pl, plus
+    // key_binding/3 + key_binding_once/3 (scripts/default_bindings.pl, plus
     // whatever a user init.pl added or overrode) are the sole dispatch path
     // now -- modal-mode's navigation-only restriction and the mark/Shift
     // selection-extend computation both moved into scriptHandleKey (see
@@ -1572,7 +1572,7 @@ static void handlePrefix(bool ctrl) {
         echo("Quit");
         return;
     }
-    // leader_binding/3 (src/default_bindings.pl, plus whatever a user
+    // leader_binding/3 (scripts/default_bindings.pl, plus whatever a user
     // init.pl added or overrode) is the sole chord dispatch path now.
     if (scriptHandlePrefixKey(shift)) {
         prefix_pending = false;
@@ -2308,7 +2308,7 @@ int editorBufferCreate(void) { return bufferCreate()->id; }
 // screen -- temporarily points the selected window at the new buffer so
 // openPath's macro-based text/len/filename/... writes land on it, restores
 // the previous buffer before returning. Whether/when to actually switch to
-// it is a policy decision left to the caller (src/buffers.pl's open_file/1).
+// it is a policy decision left to the caller (scripts/buffers.pl's open_file/1).
 int editorBufferOpenFile(const char *path) {
     Buffer *b = bufferCreate();
     Buffer *saved = selected_window->buf;
@@ -2478,7 +2478,7 @@ int main(int argc, char **argv) {
     // Loaded before the command-line file (if any) is opened, so an
     // init.pl hook(post_open, ...) also fires for it.
     if (!scriptInit()) {
-        fprintf(stderr, "te: cannot load src/bootstrap.pl (expected next to the executable, or ./src when run from the repo)\n");
+        fprintf(stderr, "te: cannot load scripts/bootstrap.pl (expected next to the executable, or ./scripts when run from the repo)\n");
         glyphs_deinit();
         platformShutdown();
         free(font_bytes);

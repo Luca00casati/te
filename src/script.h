@@ -2,7 +2,7 @@
 // rebind keys via Prolog facts/rules, the way .emacs/init.vim extend
 // Emacs/Vim -- see src/prolog.h for the engine and docs/init.pl.example for
 // the scripting surface. This is also the *sole* dispatch path now: te's
-// own default bindings/commands (src/default_bindings.pl) are facts too,
+// own default bindings/commands (scripts/default_bindings.pl) are facts too,
 // loaded after the user's init.pl so a user override at the same key/mod
 // wins (findall tries clauses in assertion order; matchAndRun fires on the
 // first match).
@@ -14,13 +14,13 @@
 #include "binding.h"
 
 // Creates the Prolog engine, registers the `te_*` native predicates, loads
-// te's own src/bootstrap.pl and every other core .pl file from disk (found
+// te's own scripts/bootstrap.pl and every other core .pl file from disk (found
 // next to the running executable -- see script.c's resolvePlDir), then
 // $XDG_CONFIG_HOME/te/init.pl (falling back to $HOME/.config/te/init.pl),
-// then src/default_bindings.pl. A missing init.pl is not an error (nor is a
+// then scripts/default_bindings.pl. A missing init.pl is not an error (nor is a
 // missing/broken file among the other core ones); a script error is echoed
 // to the status line but does not stop the editor from starting. Returns
-// false only if src/bootstrap.pl itself -- the engine's own standard
+// false only if scripts/bootstrap.pl itself -- the engine's own standard
 // library, which everything else leans on -- couldn't be found; the caller
 // should treat that as fatal, the same as a missing bundled font.
 bool scriptInit(void);
@@ -76,7 +76,7 @@ bool scriptLeaderBindingGet(size_t i, int *key, Mod *mod, const char **label);
 size_t scriptCommandCount(void);
 bool scriptCommandGet(size_t i, const char **name);
 
-// --- undo/redo history (src/undo_history.pl) ------------------------------
+// --- undo/redo history (scripts/undo_history.pl) ------------------------------
 // The bookkeeping -- what to remember, coalescing a run of typing into one
 // step, evicting the oldest entry past editorUndoDepth() -- lives in
 // Prolog; the actual buffer splice is native (te_replace_range/3, called
@@ -106,7 +106,7 @@ bool scriptUndoStackEmpty(void);
 // buffer on disk is the new baseline, so old undo/redo steps no longer apply).
 void scriptClearHistory(void);
 
-// --- search/replace (src/search.pl) ---------------------------------------
+// --- search/replace (scripts/search.pl) ---------------------------------------
 // PCRE2/memmem stay native (te_find_matches/3, te_regex_substitute/5 in
 // script.c, wrapping main.c's findMatches/editorRegexSubstitute); this is
 // the decision logic on top -- which match is selected, next/prev/replace,
@@ -168,8 +168,8 @@ void scriptSearchStatus(size_t *index, size_t *count, bool *truncated, bool *bad
 // opened, alongside the existing scriptClearHistory() call.
 void scriptClearSearch(void);
 
-// --- cursor movement (src/movement.pl) ------------------------------------
-// The raw UTF-8/line/column math stays native (see src/movement.pl's header
+// --- cursor movement (scripts/movement.pl) ------------------------------------
+// The raw UTF-8/line/column math stays native (see scripts/movement.pl's header
 // comment); this is the decision logic on top -- which direction, how far,
 // and the goal-column bookkeeping a run of up/down presses needs. main.c's
 // applyAction calls these instead of the old static moveLeft/moveVertical/
@@ -195,14 +195,14 @@ void scriptMoveVertical(int delta, bool wrap, size_t cols);
 void scriptPageUp(bool wrap, size_t cols, size_t lines);
 void scriptPageDown(bool wrap, size_t cols, size_t lines);
 
-// --- editing (src/editing.pl) ----------------------------------------------
+// --- editing (scripts/editing.pl) ----------------------------------------------
 // Insertion/deletion/clipboard/whole-line operations, the same "raw buffer
 // primitive stays native, decision logic is Prolog" split as movement and
 // search/replace: the actual splice is te_insert/1 (existing) or
 // te_apply_replace/3 (existing, undo-recording), the single-byte/substring
 // reads are te_byte_at/2 and te_buffer_range/3, and copying a (possibly
 // buffer-sized) range straight to the clipboard is te_copy_range/2 -- all
-// native, added in script.c alongside src/editing.pl. main.c's applyAction
+// native, added in script.c alongside scripts/editing.pl. main.c's applyAction
 // calls these instead of the old static deleteBack/copySelection/swapLine/
 // pasteLine/pasteClipboard/etc., keeping its switch statement's shape
 // unchanged.
@@ -225,7 +225,7 @@ void scriptCopyLine(void);
 void scriptPasteLine(void);
 void scriptSelectLine(void);
 
-// --- buffers/windows UI (src/buffers.pl, src/windows.pl) -------------------
+// --- buffers/windows UI (scripts/buffers.pl, scripts/windows.pl) -------------------
 // Buffer/window *state* (list/name/dirty/current) is main.c's own -- read
 // directly via editor.h's editorBufferCount/editorBufferIdAt/
 // editorBufferName/editorBufferDirty/editorCurrentBufferId, no Prolog round
