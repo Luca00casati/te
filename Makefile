@@ -1,5 +1,6 @@
 # Build script for `te`. Linux-only: compiles src/*.c with cc and links
-# against the system-installed SDL2 and libpcre2-8 (found via pkg-config).
+# against the system-installed GLFW3, OpenGL, libpcre2-8, FreeType2, and
+# libpng (found via pkg-config).
 #
 #   make            # produces ./te in the project root
 #   make run        # build, then run ./te
@@ -9,15 +10,17 @@
 CC ?= cc
 CFLAGS := -std=c11 -Wall -Wextra -MMD -MP
 
-SDL_CFLAGS   := $(shell pkg-config --cflags sdl2)
-SDL_LIBS     := $(shell pkg-config --libs sdl2)
+GLFW_CFLAGS  := $(shell pkg-config --cflags glfw3)
+GLFW_LIBS    := $(shell pkg-config --libs glfw3) -lGL
 PCRE2_CFLAGS := $(shell pkg-config --cflags libpcre2-8)
 PCRE2_LIBS   := $(shell pkg-config --libs libpcre2-8)
+FT_CFLAGS    := $(shell pkg-config --cflags freetype2)
+FT_LIBS      := $(shell pkg-config --libs freetype2)
+PNG_CFLAGS   := $(shell pkg-config --cflags libpng)
+PNG_LIBS     := $(shell pkg-config --libs libpng)
 
-TE_CFLAGS := $(CFLAGS) $(SDL_CFLAGS) $(PCRE2_CFLAGS)
-# -lm: stb_truetype's rasterizer uses floor/sqrt/etc; SDL2's pkg-config
-# doesn't pull libm in on its own.
-TE_LIBS   := $(SDL_LIBS) $(PCRE2_LIBS) -lm
+TE_CFLAGS := $(CFLAGS) $(GLFW_CFLAGS) $(PCRE2_CFLAGS) $(FT_CFLAGS) $(PNG_CFLAGS)
+TE_LIBS   := $(GLFW_LIBS) $(PCRE2_LIBS) $(FT_LIBS) $(PNG_LIBS) -lm
 
 .PHONY: all run test clean
 

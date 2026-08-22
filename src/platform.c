@@ -1,32 +1,35 @@
+// nanosleep needs POSIX visibility that plain -std=c11 doesn't expose.
+#define _POSIX_C_SOURCE 199309L
+
 #include "platform.h"
 
-#include <stdint.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "../third_party/stb_image_write.h"
+#include <GL/gl.h>
 
-static SDL_Window *window = NULL;
-static SDL_Renderer *renderer = NULL;
+#include <png.h>
+
+static GLFWwindow *window = NULL;
 static bool initialized = false;
-static bool should_close = false;
 static int target_fps = 60;
-static Uint64 perf_freq = 0;
-static Uint64 start_ticks = 0;
-static Uint64 frame_start_ticks = 0;
+static double start_time = 0.0;
+static double frame_start_time = 0.0;
 
-// --- keyboard: per-scancode edge state, refreshed once per frame ----------
-static bool key_pressed[SDL_NUM_SCANCODES];
-static bool key_pressed_repeat[SDL_NUM_SCANCODES];
-static bool key_released[SDL_NUM_SCANCODES];
+// --- keyboard: per-key edge state, refreshed once per frame ---------------
+#define TE_KEY_MAX (GLFW_KEY_LAST + 1)
+static bool key_pressed[TE_KEY_MAX];
+static bool key_pressed_repeat[TE_KEY_MAX];
+static bool key_released[TE_KEY_MAX];
 
 #define KEY_QUEUE_CAP 16
 static int key_press_queue[KEY_QUEUE_CAP];
 static size_t key_press_queue_len = 0, key_press_queue_pos = 0;
 
-// --- typed-codepoint FIFO, refilled from SDL_TEXTINPUT each frame ---------
+// --- typed-codepoint FIFO, refilled from GLFW's char callback each frame --
 #define CHAR_QUEUE_CAP 64
 static int char_queue[CHAR_QUEUE_CAP];
 static size_t char_queue_head = 0, char_queue_tail = 0;
@@ -44,71 +47,79 @@ int platformCharPressed(void) {
     return cp;
 }
 
-// Decodes one UTF-8 codepoint from `s` (NUL-terminated, as SDL_TEXTINPUT
-// hands it over); malformed bytes fall back to the raw byte, same
-// leniency main.c's own utf8SeqLen/decodeCp use for the text buffer.
-static void queueTextInputUtf8(const char *s) {
-    const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        uint32_t cp;
-        int len;
-        if (*p < 0x80) { cp = *p; len = 1; }
-        else if ((*p & 0xE0) == 0xC0) { cp = *p & 0x1F; len = 2; }
-        else if ((*p & 0xF0) == 0xE0) { cp = *p & 0x0F; len = 3; }
-        else if ((*p & 0xF8) == 0xF0) { cp = *p & 0x07; len = 4; }
-        else { charQueuePush(*p); p++; continue; }
-        int ok = 1;
-        for (int i = 1; i < len; i++) {
-            if ((p[i] & 0xC0) != 0x80) { ok = 0; break; }
-            cp = (cp << 6) | (p[i] & 0x3F);
-        }
-        if (!ok) { charQueuePush(*p); p++; continue; }
-        charQueuePush((int)cp);
-        p += len;
-    }
-}
-
 // --- mouse -----------------------------------------------------------------
 static float mouse_x = 0, mouse_y = 0;
 static float mouse_wheel = 0;
 static bool mouse_left_down = false;
 static bool mouse_left_pressed = false;
 
+// --- GLFW callbacks, all firing during glfwPollEvents() --------------------
+static void keyCallback(GLFWwindow *w, int key, int scancode, int action, int mods) {
+    (void)w; (void)scancode; (void)mods;
+    if (key < 0 || key > GLFW_KEY_LAST) return;
+    if (action == GLFW_PRESS) {
+        key_pressed[key] = true;
+        if (key_press_queue_len < KEY_QUEUE_CAP) key_press_queue[key_press_queue_len++] = key;
+    } else if (action == GLFW_REPEAT) {
+        key_pressed_repeat[key] = true;
+    } else if (action == GLFW_RELEASE) {
+        key_released[key] = true;
+    }
+}
+static void charCallback(GLFWwindow *w, unsigned int codepoint) {
+    (void)w;
+    charQueuePush((int)codepoint);
+}
+static void mouseButtonCallback(GLFWwindow *w, int button, int action, int mods) {
+    (void)w; (void)mods;
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) mouse_left_pressed = true;
+}
+static void scrollCallback(GLFWwindow *w, double xoffset, double yoffset) {
+    (void)w; (void)xoffset;
+    mouse_wheel += (float)yoffset;
+}
+
 void platformInit(const char *title, int fps) {
-    SDL_Init(SDL_INIT_VIDEO);
+    glfwInit();
     target_fps = fps;
 
-    SDL_Rect bounds = { 0, 0, 1280, 800 };
-    SDL_GetDisplayBounds(0, &bounds);
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    window = glfwCreateWindow(1, 1, title, NULL, NULL);
 
-    window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               1, 1, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
-    SDL_SetWindowSize(window, bounds.w / 2, bounds.h / 2);
-    SDL_ShowWindow(window);
+    GLFWmonitor *primary = glfwGetPrimaryMonitor();
+    const GLFWvidmode *mode = primary ? glfwGetVideoMode(primary) : NULL;
+    int win_w = mode ? mode->width / 2 : 640;
+    int win_h = mode ? mode->height / 2 : 400;
+    glfwSetWindowSize(window, win_w, win_h);
 
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(0); // manual frame pacing below, not vsync
 
-    SDL_StartTextInput();
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetCharCallback(window, charCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetScrollCallback(window, scrollCallback);
 
-    perf_freq = SDL_GetPerformanceFrequency();
-    start_ticks = SDL_GetPerformanceCounter();
-    frame_start_ticks = start_ticks;
+    glfwShowWindow(window);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    start_time = glfwGetTime();
+    frame_start_time = start_time;
 
     initialized = true;
 }
 
 void platformShutdown(void) {
-    if (renderer) SDL_DestroyRenderer(renderer);
-    if (window) SDL_DestroyWindow(window);
-    renderer = NULL;
+    if (window) glfwDestroyWindow(window);
     window = NULL;
     initialized = false;
-    SDL_Quit();
+    glfwTerminate();
 }
 
-SDL_Renderer *platformRenderer(void) { return renderer; }
+void *platformGLContext(void) { return initialized ? (void *)window : NULL; }
 
 void platformPollEvents(void) {
     if (!initialized) return;
@@ -120,86 +131,58 @@ void platformPollEvents(void) {
     mouse_wheel = 0;
     mouse_left_pressed = false;
 
-    SDL_Event ev;
-    while (SDL_PollEvent(&ev)) {
-        switch (ev.type) {
-            case SDL_QUIT:
-                should_close = true;
-                break;
-            case SDL_KEYDOWN: {
-                int sc = ev.key.keysym.scancode;
-                if (sc >= 0 && sc < SDL_NUM_SCANCODES) {
-                    if (ev.key.repeat) key_pressed_repeat[sc] = true;
-                    else {
-                        key_pressed[sc] = true;
-                        if (key_press_queue_len < KEY_QUEUE_CAP) key_press_queue[key_press_queue_len++] = sc;
-                    }
-                }
-                break;
-            }
-            case SDL_KEYUP: {
-                int sc = ev.key.keysym.scancode;
-                if (sc >= 0 && sc < SDL_NUM_SCANCODES) key_released[sc] = true;
-                break;
-            }
-            case SDL_TEXTINPUT:
-                queueTextInputUtf8(ev.text.text);
-                break;
-            case SDL_MOUSEWHEEL:
-                mouse_wheel += (float)ev.wheel.y;
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                if (ev.button.button == SDL_BUTTON_LEFT) mouse_left_pressed = true;
-                break;
-            default:
-                break;
-        }
-    }
+    glfwPollEvents();
 
-    int mx, my;
-    Uint32 mstate = SDL_GetMouseState(&mx, &my);
+    double mx, my;
+    glfwGetCursorPos(window, &mx, &my);
     mouse_x = (float)mx;
     mouse_y = (float)my;
-    mouse_left_down = (mstate & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+    mouse_left_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
     if (target_fps > 0) {
-        Uint64 now = SDL_GetPerformanceCounter();
-        double elapsed = (double)(now - frame_start_ticks) / (double)perf_freq;
+        double elapsed = glfwGetTime() - frame_start_time;
         double target = 1.0 / (double)target_fps;
-        if (elapsed < target) SDL_Delay((Uint32)((target - elapsed) * 1000.0));
+        if (elapsed < target) {
+            double sleep_s = target - elapsed;
+            struct timespec ts;
+            ts.tv_sec = (time_t)sleep_s;
+            ts.tv_nsec = (long)((sleep_s - (double)ts.tv_sec) * 1e9);
+            nanosleep(&ts, NULL);
+        }
     }
-    frame_start_ticks = SDL_GetPerformanceCounter();
+    frame_start_time = glfwGetTime();
 }
 
-bool platformWindowShouldClose(void) { return should_close; }
+bool platformWindowShouldClose(void) {
+    return initialized && glfwWindowShouldClose(window);
+}
 
 void platformScreenSize(float *w, float *h) {
     if (!initialized) { *w = 0; *h = 0; return; }
     int iw, ih;
-    SDL_GetWindowSize(window, &iw, &ih);
+    glfwGetFramebufferSize(window, &iw, &ih);
     *w = (float)iw;
     *h = (float)ih;
 }
 
 bool platformKeyDown(int key) {
-    if (!initialized || key < 0 || key >= SDL_NUM_SCANCODES) return false;
-    const Uint8 *state = SDL_GetKeyboardState(NULL);
-    return state[key] != 0;
+    if (!initialized || key < 0 || key > GLFW_KEY_LAST) return false;
+    return glfwGetKey(window, key) == GLFW_PRESS;
 }
 bool platformKeyPressed(int key) {
-    if (key < 0 || key >= SDL_NUM_SCANCODES) return false;
+    if (key < 0 || key > GLFW_KEY_LAST) return false;
     return key_pressed[key];
 }
 bool platformKeyPressedRepeat(int key) {
-    if (key < 0 || key >= SDL_NUM_SCANCODES) return false;
+    if (key < 0 || key > GLFW_KEY_LAST) return false;
     return key_pressed_repeat[key];
 }
 bool platformKeyReleased(int key) {
-    if (key < 0 || key >= SDL_NUM_SCANCODES) return false;
+    if (key < 0 || key > GLFW_KEY_LAST) return false;
     return key_released[key];
 }
 bool platformAnyKeyPressed(void) {
-    for (int i = 0; i < SDL_NUM_SCANCODES; i++)
+    for (int i = 0; i <= GLFW_KEY_LAST; i++)
         if (key_pressed[i] || key_pressed_repeat[i]) return true;
     return false;
 }
@@ -213,65 +196,116 @@ float platformMouseWheel(void) { return mouse_wheel; }
 bool platformMouseLeftDown(void) { return mouse_left_down; }
 bool platformMouseLeftPressed(void) { return mouse_left_pressed; }
 
-static char clipboard_buf_owned[1] = { 0 };
-static char *last_clipboard = clipboard_buf_owned;
 const char *platformGetClipboardText(void) {
     if (!initialized) return "";
-    if (last_clipboard != clipboard_buf_owned) SDL_free(last_clipboard);
-    if (SDL_HasClipboardText()) {
-        last_clipboard = SDL_GetClipboardText();
-        if (last_clipboard) return last_clipboard;
-    }
-    last_clipboard = clipboard_buf_owned;
-    return "";
+    const char *s = glfwGetClipboardString(window);
+    return s ? s : "";
 }
 void platformSetClipboardText(const char *text) {
     if (!initialized) return;
-    SDL_SetClipboardText(text);
+    glfwSetClipboardString(window, text);
 }
 
 double platformTime(void) {
-    if (!initialized || perf_freq == 0) return 0.0;
-    Uint64 now = SDL_GetPerformanceCounter();
-    return (double)(now - start_ticks) / (double)perf_freq;
+    if (!initialized) return 0.0;
+    return glfwGetTime() - start_time;
 }
 
 void platformBeginDrawing(void) { (void)0; }
+
 void platformClearBackground(Color color) {
     if (!initialized) return;
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-    SDL_RenderClear(renderer);
+    int fb_w, fb_h;
+    glfwGetFramebufferSize(window, &fb_w, &fb_h);
+    glViewport(0, 0, fb_w, fb_h);
+    // Top-left origin, y increasing downward -- matches how the editor
+    // logic already thinks about pixel coordinates.
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, fb_w, fb_h, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 }
+
 void platformEndDrawing(void) {
     if (!initialized) return;
-    SDL_RenderPresent(renderer);
+    glfwSwapBuffers(window);
 }
 
 void platformDrawRect(float x, float y, float w, float h, Color color) {
     if (!initialized) return;
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-    SDL_FRect rect = { x, y, w, h };
-    SDL_RenderFillRectF(renderer, &rect);
+    glDisable(GL_TEXTURE_2D);
+    glColor4ub(color.r, color.g, color.b, color.a);
+    glBegin(GL_QUADS);
+    glVertex2f(x, y);
+    glVertex2f(x + w, y);
+    glVertex2f(x + w, y + h);
+    glVertex2f(x, y + h);
+    glEnd();
 }
 
-void platformDrawTexture(SDL_Texture *tex, float x, float y, Color color) {
-    if (!initialized || !tex) return;
-    int tw, th;
-    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
-    SDL_SetTextureColorMod(tex, color.r, color.g, color.b);
-    SDL_SetTextureAlphaMod(tex, color.a);
-    SDL_FRect dst = { x, y, (float)tw, (float)th };
-    SDL_RenderCopyF(renderer, tex, NULL, &dst);
+void platformDrawTexture(Texture tex, float x, float y, Color color) {
+    if (!initialized || tex.id == 0) return;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, tex.id);
+    // Texture's own RGB is white, alpha is coverage -- GL_MODULATE (GL's
+    // default texture env mode) multiplies the sample by gl_Color, giving
+    // the same "color mod + alpha mod" tint SDL_Renderer did.
+    glColor4ub(color.r, color.g, color.b, color.a);
+    float w = (float)tex.w, h = (float)tex.h;
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(x, y);
+    glTexCoord2f(1, 0); glVertex2f(x + w, y);
+    glTexCoord2f(1, 1); glVertex2f(x + w, y + h);
+    glTexCoord2f(0, 1); glVertex2f(x, y + h);
+    glEnd();
 }
 
 void platformScreenshot(const char *path) {
     if (!initialized) return;
     int w, h;
-    SDL_GetRendererOutputSize(renderer, &w, &h);
+    glfwGetFramebufferSize(window, &w, &h);
     unsigned char *pixels = malloc((size_t)w * (size_t)h * 4);
     if (!pixels) return;
-    if (SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ABGR8888, pixels, w * 4) == 0) {
-        stbi_write_png(path, w, h, 4, pixels, w * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        free(pixels);
+        return;
     }
+
+    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    png_infop info = png ? png_create_info_struct(png) : NULL;
+    png_bytep *rows = NULL;
+    if (!png || !info || setjmp(png_jmpbuf(png))) {
+        free(rows);
+        if (png) png_destroy_write_struct(&png, info ? &info : NULL);
+        fclose(fp);
+        free(pixels);
+        return;
+    }
+
+    png_init_io(png, fp);
+    png_set_IHDR(png, info, (png_uint_32)w, (png_uint_32)h, 8, PNG_COLOR_TYPE_RGBA,
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(png, info);
+
+    // glReadPixels' rows run bottom-up; a row-pointer table listing them
+    // top-down avoids copying to flip them.
+    int stride = w * 4;
+    rows = malloc((size_t)h * sizeof(png_bytep));
+    if (rows) {
+        for (int row = 0; row < h; row++) rows[row] = pixels + (size_t)(h - 1 - row) * (size_t)stride;
+        png_write_image(png, rows);
+        png_write_end(png, NULL);
+    }
+
+    free(rows);
+    png_destroy_write_struct(&png, &info);
+    fclose(fp);
     free(pixels);
 }

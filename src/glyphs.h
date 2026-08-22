@@ -15,7 +15,7 @@
 #include "platform.h"
 
 typedef struct {
-    SDL_Texture *tex;
+    Texture tex;
     bool has;      // a real glyph was rasterized (vs. a blank/missing one)
     uint8_t cells; // display width: 1 = half-width, 2 = full-width
     float ox, oy;  // glyph bearing: pixel offset from the pen position to
@@ -23,11 +23,11 @@ typedef struct {
 } Glyph;
 
 // `data`/`data_len` must stay valid for as long as the cache is used (glyphs
-// are rasterized lazily on demand, not all up front). `renderer` is where
-// glyph textures get created -- pass NULL (e.g. in tests, which never open
-// a window) to keep the cache safely inert: glyphs_get/glyphs_cells still
-// work, they just never rasterize a real bitmap or touch SDL.
-void glyphs_init(const unsigned char *data, size_t data_len, int px, SDL_Renderer *renderer);
+// are rasterized lazily on demand, not all up front). `gl_ctx` is
+// platformGLContext() -- pass NULL (e.g. in tests, which never open a
+// window) to keep the cache safely inert: glyphs_get/glyphs_cells still
+// work, they just never rasterize a real bitmap or touch GL.
+void glyphs_init(const unsigned char *data, size_t data_len, int px, void *gl_ctx);
 void glyphs_deinit(void);
 
 // Drop every cached glyph and re-target a new rasterization size (used when

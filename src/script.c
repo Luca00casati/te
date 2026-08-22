@@ -54,20 +54,21 @@ static void reportError(const char *msg, void *ctx) {
 }
 
 static const struct { const char *name; int key; } NAMED_KEYS[] = {
-    { "space", SDL_SCANCODE_SPACE }, { "enter", SDL_SCANCODE_RETURN }, { "kp_enter", SDL_SCANCODE_KP_ENTER },
-    { "tab", SDL_SCANCODE_TAB }, { "backspace", SDL_SCANCODE_BACKSPACE }, { "delete", SDL_SCANCODE_DELETE },
-    { "escape", SDL_SCANCODE_ESCAPE },
+    { "space", GLFW_KEY_SPACE }, { "enter", GLFW_KEY_ENTER }, { "kp_enter", GLFW_KEY_KP_ENTER },
+    { "tab", GLFW_KEY_TAB }, { "backspace", GLFW_KEY_BACKSPACE }, { "delete", GLFW_KEY_DELETE },
+    { "escape", GLFW_KEY_ESCAPE },
 };
 static const size_t NAMED_KEYS_COUNT = sizeof(NAMED_KEYS) / sizeof(NAMED_KEYS[0]);
 
-// SDL_SCANCODE_A..Z are sequential, so letters are still plain arithmetic;
-// digits are sequential too but in 1..9,0 order (SDL_SCANCODE_0 comes last),
-// unlike raylib's KEY_ZERO..KEY_NINE which equaled ASCII '0'..'9' directly.
+// GLFW_KEY_A..Z and GLFW_KEY_0..9 both equal ASCII 'A'..'Z'/'0'..'9', but
+// '0' is still handled separately below rather than folded into the '1'..'9'
+// arithmetic, matching the SDL scancode ordering this replaced (where 0 sat
+// after 9, not before it).
 static int keyFromChar(char c) {
     char u = (char)toupper((unsigned char)c);
-    if (u >= 'A' && u <= 'Z') return SDL_SCANCODE_A + (u - 'A');
-    if (u == '0') return SDL_SCANCODE_0;
-    if (u >= '1' && u <= '9') return SDL_SCANCODE_1 + (u - '1');
+    if (u >= 'A' && u <= 'Z') return GLFW_KEY_A + (u - 'A');
+    if (u == '0') return GLFW_KEY_0;
+    if (u >= '1' && u <= '9') return GLFW_KEY_1 + (u - '1');
     return -1;
 }
 

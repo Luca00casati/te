@@ -1,12 +1,12 @@
-# te — a simple GUI text editor in C + SDL2
+# te — a simple GUI text editor in C + GLFW
 
 A minimal GUI text editor, built and tested on **Linux only**. Single window,
 monospace grid, load/edit/save a plain-text file. Built with
-[SDL2](https://www.libsdl.org/) and PCRE2 (both linked from the system
-install, found via pkg-config), plus a small from-scratch Prolog engine for
-scripting and a vendored `stb_truetype`/`stb_image_write` for font
-rasterization/screenshot PNG output, using a plain GNU Makefile as the build
-system.
+[GLFW](https://www.glfw.org/) (windowing/input) + OpenGL 1.1 (rendering),
+PCRE2, FreeType2 (font rasterization), and libpng (screenshot PNG output) —
+all linked from the system install, found via pkg-config — plus a small
+from-scratch Prolog engine for scripting, using a plain GNU Makefile as the
+build system.
 
 Text is rendered with **[UnifontEX](https://github.com/stgiga/UnifontEX)** — a
 single font covering every Unicode plane — so Latin, Greek, Cyrillic, CJK,
@@ -193,18 +193,24 @@ content. ISO-flavored, not a certified conformance suite.
 
 Linux. Install:
 
-- **SDL2** (`libsdl2-dev`) and **libpcre2-8** (`libpcre2-dev`), discovered via
-  **pkg-config** (`sdl2.pc`/`libpcre2-8.pc` — your distro's dev packages, e.g.
-  on Debian/Ubuntu: `sudo apt install libsdl2-dev libpcre2-dev`). If
-  pkg-config can't find one, point `PKG_CONFIG_PATH` at the directory holding
-  its `.pc` file. The Makefile calls `pkg-config --cflags/--libs` directly —
-  no wrapper or generator step. SDL2 is linked as a shared library, so its own
-  transitive dependencies (X11, OpenGL, ALSA, ...) are resolved automatically
-  by the dynamic linker — nothing else to install for them.
+- **GLFW3** (`libglfw3-dev`), **OpenGL** (`libgl1-mesa-dev` or your driver's
+  GL dev package), **libpcre2-8** (`libpcre2-dev`), **FreeType2**
+  (`libfreetype-dev`), and **libpng** (`libpng-dev`), discovered via
+  **pkg-config** (`glfw3.pc`/`gl.pc`/`libpcre2-8.pc`/`freetype2.pc`/
+  `libpng.pc` — your distro's dev packages, e.g. on Debian/Ubuntu:
+  `sudo apt install libglfw3-dev libgl1-mesa-dev libpcre2-dev
+  libfreetype-dev libpng-dev`). If pkg-config can't find one, point
+  `PKG_CONFIG_PATH` at the directory holding its `.pc` file. The Makefile
+  calls `pkg-config --cflags/--libs` directly — no wrapper or generator step.
+  GLFW is deliberately used only for windowing/input/context creation, not
+  rendering: all drawing goes through OpenGL 1.1's fixed-function pipeline
+  directly (immediate-mode `glBegin`/`glVertex2f`/`glTexCoord2f`), so there's
+  no shader toolchain or GL loader to install — GLFW+GL's own transitive
+  dependencies (X11, ...) are resolved automatically by the dynamic linker.
 
-`UnifontExMono.ttf` is bundled in the repo, so nothing to fetch for it, and
-`third_party/stb_truetype.h`/`stb_image_write.h` are vendored (public domain,
-single-header) — no separate font-rendering or image library to install.
+`UnifontExMono.ttf` is bundled in the repo, so nothing to fetch for it.
+FreeType2 rasterizes it and libpng writes `--screenshot`'s PNG output, both
+linked from the system install — no vendored font-rendering or image code.
 
 ## Building
 
@@ -240,23 +246,24 @@ Two suites, both under `tests/`:
   feeds operation-based undo/redo (typing coalesced into one step), clipboard/
   mouse hit-testing/scrolling via `src/platform.c`, and rendering (gutter line
   numbers, selection highlight, blinking caret, status bar).
-- `src/platform.h`/`platform.c` — the only place `te` touches SDL directly:
-  window/renderer setup, per-frame input (turns SDL's event queue into
-  held/pressed/repeated/released query functions plus a typed-Unicode-
-  codepoint queue from `SDL_TEXTINPUT`), clipboard, timing, drawing
-  primitives, and `--screenshot`'s PNG capture. Every query function is a
-  documented no-op/safe-default before `platformInit()` runs, which is what
-  lets `tests/unit_te.c` `#include` `main.c` directly without ever opening a
-  window.
+- `src/platform.h`/`platform.c` — the only place `te` touches GLFW/OpenGL
+  directly: window/GL-context setup, per-frame input (turns GLFW's
+  callback-driven events into held/pressed/repeated/released query functions
+  plus a typed-Unicode-codepoint queue fed by GLFW's char callback), clipboard,
+  timing, drawing primitives (immediate-mode OpenGL 1.1 quads — no shaders,
+  no GL loader), and `--screenshot`'s PNG capture (`glReadPixels` piped
+  through libpng, linked from the system install). Every query function is
+  a documented no-op/safe-default before `platformInit()` runs, which is
+  what lets `tests/unit_te.c` `#include` `main.c` directly without ever
+  opening a window.
 - **Text rendering** covers all of Unicode via one lazy per-codepoint glyph
-  cache (`src/glyphs.c`, an open-addressing hash table of small SDL
-  textures) — every printable codepoint rasterizes through it on first use.
-  Rasterization is vendored `stb_truetype` (`third_party/stb_truetype.h`,
-  public domain — the same rasterizer raylib used internally before the
-  SDL2 switch), which keeps UnifontEX pixel-crisp at 16px-multiple sizes
-  without extra work: the coverage naturally lands on 0/255 when the glyph
-  outline sits on pixel boundaries. The column model is width-aware
-  (full-width glyphs occupy two cells).
+  cache (`src/glyphs.c`, an open-addressing hash table of small GL textures)
+  — every printable codepoint rasterizes through it on first use.
+  Rasterization goes through **FreeType2** (linked from the system install),
+  which keeps UnifontEX pixel-crisp at 16px-multiple sizes without extra
+  work: the AA coverage naturally lands on 0/255 when the glyph outline sits
+  on pixel boundaries. The column model is width-aware (full-width glyphs
+  occupy two cells).
 - **The font is loaded from disk at startup**, from the same directory as the
   running executable. `UnifontExMono.ttf` is bundled in the repo rather than
   embedded into the binary; `te` exits with a clear error if it can't find it.
@@ -316,11 +323,12 @@ Two suites, both under `tests/`:
   up/down presses tries to keep (`goal_col_set`/`goal_col_val` facts, replacing
   the old C statics of the same name).
 - The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
-  `src/script.c`, and `src/prolog.c` as C11 and links against SDL2 and
-  libpcre2-8 (found via pkg-config; the Prolog engine adds no external
-  dependency) into `./te` in the project root — SDL2 is a shared library, so
-  its own transitive system dependencies resolve automatically at link time,
-  unlike raylib's old static archive. There's no codegen step for the `.pl`
+  `src/script.c`, and `src/prolog.c` as C11 and links against GLFW3, OpenGL,
+  libpcre2-8, FreeType2, and libpng (found via pkg-config; the Prolog engine
+  adds no external dependency) into `./te` in the project root — GLFW is a
+  shared library, so its own transitive system dependencies resolve
+  automatically at link time, unlike raylib's old static archive. There's no
+  codegen step for the `.pl`
   files (see above) — `script.c`'s `resolvePlDir` finds `src/` next to the
   running executable at startup (matching how `loadFontFile` finds the
   bundled font), falling back to a plain `src` relative to the working
@@ -341,9 +349,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 Third-party components keep their own licenses:
 
-- **SDL2** (linked from the system install) — zlib license.
+- **GLFW** (linked from the system install) — zlib license.
 - **PCRE2** (linked from the system install) — BSD license.
-- **stb_truetype**/**stb_image_write** (vendored, `third_party/`) — public domain.
+- **FreeType2** (linked from the system install) — FreeType License (BSD-style).
+- **libpng** (linked from the system install) — libpng license.
 - **UnifontEX** (bundled as `UnifontExMono.ttf`) — derived from GNU Unifont;
   distributed under the SIL Open Font License 1.1 and the GNU GPLv2 with the
   font-embedding exception.

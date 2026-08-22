@@ -505,8 +505,9 @@ static size_t byteAtCol(size_t start, size_t stop, size_t col) {
 // Draws one glyph at pixel (x, y) tinted `color`, returning x advanced by
 // its cell width -- the one primitive drawCells/drawStr both walk with.
 // Every printable codepoint goes through glyphs_get (no separate atlas
-// texture/batched string draw -- SDL has no equivalent to build one from,
-// and the lazy cache already does exactly this for CJK/emoji today).
+// texture/batched string draw -- platformDrawTexture has no equivalent to
+// build one from, and the lazy cache already does exactly this for CJK/
+// emoji today).
 static float drawCp(uint32_t cp, float x, float y, float cw, Color color) {
     if (cp < 0x20) return x + cw;
     Glyph g = glyphs_get(cp);
@@ -1025,17 +1026,17 @@ static void mbConfirm(void) {
 static void handleMinibuffer(bool ctrl) {
     if (mb_kind == MB_CHAR_QUERY) {
         // currently only the quit question
-        if (platformKeyPressed(SDL_SCANCODE_Y) || platformKeyPressed(SDL_SCANCODE_S)) {
+        if (platformKeyPressed(GLFW_KEY_Y) || platformKeyPressed(GLFW_KEY_S)) {
             if (saveFile()) {
                 running = false;
             } else {
                 echo("Save failed");
                 mbClose();
             }
-        } else if (platformKeyPressed(SDL_SCANCODE_N)) {
+        } else if (platformKeyPressed(GLFW_KEY_N)) {
             running = false;
-        } else if (platformKeyPressed(SDL_SCANCODE_C) || platformKeyPressed(SDL_SCANCODE_ESCAPE) ||
-                   (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
+        } else if (platformKeyPressed(GLFW_KEY_C) || platformKeyPressed(GLFW_KEY_ESCAPE) ||
+                   (ctrl && platformKeyPressed(GLFW_KEY_G))) {
             mbClose();
             quit_requested = false;
         }
@@ -1044,14 +1045,14 @@ static void handleMinibuffer(bool ctrl) {
 
     if (mb_kind == MB_REPLACE_QUERY) {
         // Interactive query-replace: Enter replaces & advances, n/p navigate.
-        if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
+        if (platformKeyPressed(GLFW_KEY_ESCAPE) || (ctrl && platformKeyPressed(GLFW_KEY_G))) {
             echo("Replace done");
             mbClose();
-        } else if (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER)) {
+        } else if (platformKeyPressed(GLFW_KEY_ENTER) || platformKeyPressed(GLFW_KEY_KP_ENTER)) {
             replaceCurrentMatch();
-        } else if (pressed(SDL_SCANCODE_N)) {
+        } else if (pressed(GLFW_KEY_N)) {
             replaceStep(true);
-        } else if (pressed(SDL_SCANCODE_P)) {
+        } else if (pressed(GLFW_KEY_P)) {
             replaceStep(false);
         }
         return;
@@ -1059,7 +1060,7 @@ static void handleMinibuffer(bool ctrl) {
 
     // text_prompt
     bool is_search = mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM;
-    if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
+    if (platformKeyPressed(GLFW_KEY_ESCAPE) || (ctrl && platformKeyPressed(GLFW_KEY_G))) {
         if (is_search) { // abort returns to where the search began
             size_t origin = scriptSearchOrigin();
             anchor = origin;
@@ -1069,21 +1070,21 @@ static void handleMinibuffer(bool ctrl) {
         mbClose();
         return;
     }
-    if (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER)) {
+    if (platformKeyPressed(GLFW_KEY_ENTER) || platformKeyPressed(GLFW_KEY_KP_ENTER)) {
         mbConfirm();
         return;
     }
-    if (platformKeyPressed(SDL_SCANCODE_TAB)) {
+    if (platformKeyPressed(GLFW_KEY_TAB)) {
         mbComplete();
         return;
     }
     // In the search/replace-pattern prompt, C-n / C-p jump between matches.
     if (is_search && ctrl) {
-        if (pressed(SDL_SCANCODE_N)) {
+        if (pressed(GLFW_KEY_N)) {
             searchStep(true);
             return;
         }
-        if (pressed(SDL_SCANCODE_P)) {
+        if (pressed(GLFW_KEY_P)) {
             searchStep(false);
             return;
         }
@@ -1101,20 +1102,20 @@ static void handleMinibuffer(bool ctrl) {
             cp = platformCharPressed();
         }
     }
-    if (pressed(SDL_SCANCODE_BACKSPACE)) {
+    if (pressed(GLFW_KEY_BACKSPACE)) {
         mbBackspace();
         changed = true;
     }
-    if (pressed(SDL_SCANCODE_LEFT) && mb_cursor > 0) {
+    if (pressed(GLFW_KEY_LEFT) && mb_cursor > 0) {
         mb_cursor--;
         while (mb_cursor > 0 && isCont((unsigned char)mb_input[mb_cursor])) mb_cursor--;
     }
-    if (pressed(SDL_SCANCODE_RIGHT) && mb_cursor < mb_len) {
+    if (pressed(GLFW_KEY_RIGHT) && mb_cursor < mb_len) {
         mb_cursor++;
         while (mb_cursor < mb_len && isCont((unsigned char)mb_input[mb_cursor])) mb_cursor++;
     }
-    if (pressed(SDL_SCANCODE_HOME)) mb_cursor = 0;
-    if (pressed(SDL_SCANCODE_END)) mb_cursor = mb_len;
+    if (pressed(GLFW_KEY_HOME)) mb_cursor = 0;
+    if (pressed(GLFW_KEY_END)) mb_cursor = mb_len;
     // Incremental search: re-run and jump to the nearest match as you type.
     if (changed && is_search) searchUpdate();
 }
@@ -1434,7 +1435,7 @@ static void handleInput(bool ctrl, Metrics m) {
     // minibuffer, when open, handles Esc itself).
     // In modal mode a bare key acts like its Ctrl-chord.
     bool cmd = ctrl || modal;
-    if (platformKeyPressed(SDL_SCANCODE_ESCAPE)) {
+    if (platformKeyPressed(GLFW_KEY_ESCAPE)) {
         anchor = cursor;
         mark_active = false;
         repeat_count_set = false;
@@ -1461,12 +1462,12 @@ static void handleInput(bool ctrl, Metrics m) {
     }
     // C-Enter opens a blank line below; C-Shift-Enter opens one above. Handled
     // here (not via the table) so the plain-Enter binding doesn't also fire.
-    if (ctrl && (platformKeyPressed(SDL_SCANCODE_RETURN) || platformKeyPressed(SDL_SCANCODE_KP_ENTER))) {
+    if (ctrl && (platformKeyPressed(GLFW_KEY_ENTER) || platformKeyPressed(GLFW_KEY_KP_ENTER))) {
         runAction(shift ? ACTION_OPEN_LINE_ABOVE : ACTION_OPEN_LINE_BELOW);
         return;
     }
     // C-Space (or bare Space in modal) toggles the mark; movement then extends.
-    if (cmd && platformKeyPressed(SDL_SCANCODE_SPACE)) {
+    if (cmd && platformKeyPressed(GLFW_KEY_SPACE)) {
         mark_active = !mark_active;
         anchor = cursor;
         echo(mark_active ? "Mark set" : "Mark deactivated");
@@ -1474,13 +1475,13 @@ static void handleInput(bool ctrl, Metrics m) {
         return;
     }
     // C-<digit> (or bare digit in modal) accumulates a repeat count.
-    // SDL_SCANCODE_1..9/KP_1..9 are sequential but SDL_SCANCODE_0/KP_0 comes
+    // GLFW_KEY_1..9/KP_1..9 are sequential but GLFW_KEY_0/KP_0 comes
     // *after* 9, not before -- unlike raylib's KEY_ZERO..KEY_NINE, so d==0
     // needs its own scancode rather than d-based arithmetic from a zero base.
     if (cmd && !shift) {
         for (int d = 0; d <= 9; d++) {
-            int digit_key = (d == 0) ? SDL_SCANCODE_0 : SDL_SCANCODE_1 + (d - 1);
-            int kp_key = (d == 0) ? SDL_SCANCODE_KP_0 : SDL_SCANCODE_KP_1 + (d - 1);
+            int digit_key = (d == 0) ? GLFW_KEY_0 : GLFW_KEY_1 + (d - 1);
+            int kp_key = (d == 0) ? GLFW_KEY_KP_0 : GLFW_KEY_KP_1 + (d - 1);
             if (platformKeyPressed(digit_key) || platformKeyPressed(kp_key)) {
                 size_t cur = repeat_count_set ? repeat_count_val : 0;
                 size_t nv = cur * 10 + (size_t)d;
@@ -1528,7 +1529,7 @@ static void handleInput(bool ctrl, Metrics m) {
 // safe: bindings use platformKeyPressed and text uses platformCharPressed,
 // both independent of it.
 static void detectCtrlTaps(void) {
-    int lc = SDL_SCANCODE_LCTRL, rc = SDL_SCANCODE_RCTRL;
+    int lc = GLFW_KEY_LEFT_CONTROL, rc = GLFW_KEY_RIGHT_CONTROL;
     if (platformKeyPressed(lc) || platformKeyPressed(rc)) ctrl_clean = true;
     int k = platformKeyPressedQueue();
     while (k != 0) {
@@ -1558,7 +1559,7 @@ static void detectCtrlTaps(void) {
 // fires a shortcut directly. Chords match with Ctrl optional (leader s ==
 // leader C-s); Shift selects shifted variants.
 static void handlePrefix(bool ctrl) {
-    if (platformKeyPressed(SDL_SCANCODE_ESCAPE) || (ctrl && platformKeyPressed(SDL_SCANCODE_G))) {
+    if (platformKeyPressed(GLFW_KEY_ESCAPE) || (ctrl && platformKeyPressed(GLFW_KEY_G))) {
         prefix_pending = false;
         echo("Quit");
         return;
@@ -1575,13 +1576,13 @@ static void handlePrefix(bool ctrl) {
         return;
     }
     // leader n -> key/navigation help overlay
-    if (platformKeyPressed(SDL_SCANCODE_N)) {
+    if (platformKeyPressed(GLFW_KEY_N)) {
         prefix_pending = false;
         help = HELP_NAV;
         return;
     }
     // leader h -> commands help overlay
-    if (platformKeyPressed(SDL_SCANCODE_H)) {
+    if (platformKeyPressed(GLFW_KEY_H)) {
         prefix_pending = false;
         help = HELP_COMMANDS;
         return;
@@ -1669,20 +1670,20 @@ static const char *modPrefix(Mod m) {
     }
 }
 static const char *keyLabel(int key) {
-    if (key == SDL_SCANCODE_LEFT) return "Left";
-    if (key == SDL_SCANCODE_RIGHT) return "Right";
-    if (key == SDL_SCANCODE_UP) return "Up";
-    if (key == SDL_SCANCODE_DOWN) return "Down";
-    if (key == SDL_SCANCODE_HOME) return "Home";
-    if (key == SDL_SCANCODE_END) return "End";
-    if (key == SDL_SCANCODE_PAGEUP) return "PgUp";
-    if (key == SDL_SCANCODE_PAGEDOWN) return "PgDn";
-    if (key == SDL_SCANCODE_RETURN) return "Enter";
-    if (key == SDL_SCANCODE_KP_ENTER) return "KpEnter";
-    if (key == SDL_SCANCODE_TAB) return "Tab";
-    if (key == SDL_SCANCODE_BACKSPACE) return "Backspace";
-    if (key == SDL_SCANCODE_DELETE) return "Delete";
-    if (key == SDL_SCANCODE_SPACE) return "Space";
+    if (key == GLFW_KEY_LEFT) return "Left";
+    if (key == GLFW_KEY_RIGHT) return "Right";
+    if (key == GLFW_KEY_UP) return "Up";
+    if (key == GLFW_KEY_DOWN) return "Down";
+    if (key == GLFW_KEY_HOME) return "Home";
+    if (key == GLFW_KEY_END) return "End";
+    if (key == GLFW_KEY_PAGE_UP) return "PgUp";
+    if (key == GLFW_KEY_PAGE_DOWN) return "PgDn";
+    if (key == GLFW_KEY_ENTER) return "Enter";
+    if (key == GLFW_KEY_KP_ENTER) return "KpEnter";
+    if (key == GLFW_KEY_TAB) return "Tab";
+    if (key == GLFW_KEY_BACKSPACE) return "Backspace";
+    if (key == GLFW_KEY_DELETE) return "Delete";
+    if (key == GLFW_KEY_SPACE) return "Space";
     return "";
 }
 // Human-readable chord like "C-S-Left" or "B" into buf; returns its length.
@@ -1697,8 +1698,8 @@ static size_t comboName(char *buf, int key, Mod mod) {
     if (named_len > 0) {
         memcpy(buf + n, named, named_len);
         n += named_len;
-    } else if (key >= SDL_SCANCODE_A && key <= SDL_SCANCODE_Z) {
-        buf[n++] = (char)('A' + (key - SDL_SCANCODE_A));
+    } else if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+        buf[n++] = (char)('A' + (key - GLFW_KEY_A));
     } else {
         buf[n++] = '?';
     }
@@ -1819,8 +1820,8 @@ static size_t digitCount(size_t n) {
 }
 
 // Resolve UnifontExMono.ttf next to the running executable and read it whole
-// into a heap buffer kept for the program's lifetime (glyphs.c's stb_truetype
-// rasterizer needs the raw bytes, not a path).
+// into a heap buffer kept for the program's lifetime (glyphs.c's FreeType
+// rasterizer is handed the raw bytes via FT_New_Memory_Face, not a path).
 static bool loadFontFile(void) {
     char exe_path[4096];
     ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -1951,7 +1952,7 @@ int main(int argc, char **argv) {
     platformInit(CFG_WINDOW_TITLE, CFG_TARGET_FPS);
 
     float font_size = CFG_FONT_SIZE; // mutable: Ctrl +/- zooms it
-    glyphs_init(font_bytes, font_bytes_len, (int)font_size, platformRenderer());
+    glyphs_init(font_bytes, font_bytes_len, (int)font_size, platformGLContext());
 
     float char_w = glyphs_advance('M');
     float line_h = font_size + CFG_FONT_LINE_GAP;
@@ -1997,8 +1998,8 @@ int main(int argc, char **argv) {
 
     while (running) {
         platformPollEvents();
-        shift = platformKeyDown(SDL_SCANCODE_LSHIFT) || platformKeyDown(SDL_SCANCODE_RSHIFT);
-        bool ctrl = platformKeyDown(SDL_SCANCODE_LCTRL) || platformKeyDown(SDL_SCANCODE_RCTRL);
+        shift = platformKeyDown(GLFW_KEY_LEFT_SHIFT) || platformKeyDown(GLFW_KEY_RIGHT_SHIFT);
+        bool ctrl = platformKeyDown(GLFW_KEY_LEFT_CONTROL) || platformKeyDown(GLFW_KEY_RIGHT_CONTROL);
         if (swallow_char_frames > 0) {
             swallow_char_frames--;
             while (platformCharPressed() != 0) {}
@@ -2007,7 +2008,7 @@ int main(int argc, char **argv) {
         // and typing is suppressed (see handleInput). Ignored while a minibuffer
         // prompt is open so 'm' types normally there; swallow the toggling key so
         // the bare 'm' that exits modal isn't inserted as text.
-        if (platformKeyPressed(SDL_SCANCODE_M) && (ctrl || (modal && mb_kind == MB_NONE))) {
+        if (platformKeyPressed(GLFW_KEY_M) && (ctrl || (modal && mb_kind == MB_NONE))) {
             modal = !modal;
             echo(modal ? "Modal ON (m/Esc to exit)" : "Modal OFF");
             while (platformCharPressed() != 0) {}
@@ -2063,8 +2064,8 @@ int main(int argc, char **argv) {
         // UnifontEX pixel-crisp). Reset the glyph cache to re-rasterize at
         // the new size.
         if (help == HELP_NONE && mb_kind == MB_NONE) {
-            bool zin = ctrl && (platformKeyPressed(SDL_SCANCODE_EQUALS) || platformKeyPressed(SDL_SCANCODE_KP_PLUS));
-            bool zout = ctrl && (platformKeyPressed(SDL_SCANCODE_MINUS) || platformKeyPressed(SDL_SCANCODE_KP_MINUS));
+            bool zin = ctrl && (platformKeyPressed(GLFW_KEY_EQUAL) || platformKeyPressed(GLFW_KEY_KP_ADD));
+            bool zout = ctrl && (platformKeyPressed(GLFW_KEY_MINUS) || platformKeyPressed(GLFW_KEY_KP_SUBTRACT));
             if (zin || zout) {
                 float step = zin ? 16.0f : -16.0f;
                 float ns = font_size + step;

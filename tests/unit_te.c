@@ -5,16 +5,16 @@
 // that logic without a large refactor is to #include the source directly, so
 // its statics become ordinary file-scope symbols here. main() is renamed out
 // of the way first so it is never linked in as `main` and never called --
-// nothing in this file ever creates an SDL window.
+// nothing in this file ever creates a GLFW window.
 //
 // platformTime()/platformKeyPressed() (called incidentally by edit()/echo())
 // are safe to call pre-platformInit: every platform* query function is an
 // explicit, documented no-op/safe-default before platformInit runs (see
 // platform.h). Two things are NOT safe and are deliberately never exercised
-// here: platformSetClipboardText/platformGetClipboardText (need a live SDL
-// video subsystem) and any codepoint outside inAtlas()'s ranges (glyphs_get()
-// would try to create an SDL texture). Tests below stick to ASCII/Latin/
-// Greek/Cyrillic, which inAtlas() covers.
+// here: platformSetClipboardText/platformGetClipboardText (need a live GLFW
+// window) and any codepoint outside inAtlas()'s ranges (glyphs_get() would
+// try to create a GL texture). Tests below stick to ASCII/Latin/Greek/
+// Cyrillic, which inAtlas() covers.
 #define main te_disabled_main
 #include "../src/main.c"
 #undef main
