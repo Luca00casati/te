@@ -615,6 +615,34 @@ static void test_window_delete_others(void) {
     CHECK(editorWindowBufferId(win3) != -1); // win3's own buffer survives, untouched
 }
 
+// computeLayout/windowAtPoint drive both rendering and mouse-click pane
+// selection (main()'s per-frame loop) -- exercised here directly since a
+// real mouse click can't be simulated in this headless test binary.
+static void test_window_layout_and_click_hit_test(void) {
+    int win1 = editorSelectedWindowId();
+    int win2 = editorWindowSplit(win1, /*below=*/false); // split right
+
+    Rect content = { 0, 0, 640, 480 };
+    computeLayout(root_window, content);
+
+    Window *w1 = windowFindById(win1);
+    Window *w2 = windowFindById(win2);
+    CHECK(w1 != NULL && w2 != NULL);
+    // split_right: the split target (w1) keeps the left half, the new leaf
+    // (w2) gets the right half; both keep the full height.
+    CHECK(w1->rect.x == 0);
+    CHECK(w2->rect.x == w1->rect.x + w1->rect.w);
+    CHECK(w1->rect.w + w2->rect.w == content.w);
+    CHECK(w1->rect.h == content.h && w2->rect.h == content.h);
+
+    CHECK(windowAtPoint(root_window, 10, 10) == w1);              // left half
+    CHECK(windowAtPoint(root_window, content.w - 10, 10) == w2);   // right half
+    CHECK(windowAtPoint(root_window, w1->rect.w - 1, 10) == w1);   // just inside the boundary
+    CHECK(windowAtPoint(root_window, w1->rect.w, 10) == w2);       // exactly on the boundary
+
+    CHECK(editorWindowClose(win2));
+}
+
 // --- Prolog scripting (src/script.c) -------------------------------------
 static void test_script_loads_and_runs_api(void) {
     reset();
@@ -724,6 +752,7 @@ int main(void) {
     RUN(test_window_split_close);
     RUN(test_window_split_independent_view);
     RUN(test_window_delete_others);
+    RUN(test_window_layout_and_click_hit_test);
 
     scriptShutdown(); // the script-specific tests below set up their own engine each
     RUN(test_script_loads_and_runs_api);

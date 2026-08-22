@@ -24,7 +24,10 @@
 // --- small value types -------------------------------------------------
 typedef struct { size_t line, col; } LineCol;
 typedef struct { uint32_t cp; size_t nbytes; } Cp;
-typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; } Metrics;
+// `origin_y` is the owning pane's rect.y (0 when there's only ever the one
+// full-window pane) -- text_x0 already bakes in the pane's rect.x, but the
+// row math (offsetFromMouse, CFG_MARGIN_Y) needs the y origin explicitly.
+typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; float origin_y; } Metrics;
 
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
 typedef enum { MBI_NONE, MBI_FIND_FILE, MBI_WRITE_FILE, MBI_SEARCH, MBI_REPLACE_FROM, MBI_REPLACE_TO, MBI_QUIT, MBI_COMMAND } MbIntent;
@@ -64,14 +67,20 @@ typedef struct Buffer {
     struct Buffer *next; // intrusive list, creation order
 } Buffer;
 
+// A pixel rectangle -- one leaf's on-screen pane, or (transiently, during
+// layout) a split node's own share of its parent's rect. Recomputed every
+// frame by computeLayout, not persisted across frames for its own sake;
+// stored on the Window only so the draw pass and mouse-click hit-testing
+// (windowAtPoint) both read the same numbers without recomputing them.
+typedef struct { float x, y, w, h; } Rect;
+
 // ---------------------------------------------------------------------------
 // Window: one on-screen pane. A leaf shows a Buffer and owns that pane's own
 // view/interaction state (scroll position, wrap, cursor, selection) -- real
 // Emacs semantics: point and scroll position are per-window, not per-buffer,
 // so the same buffer open in two panes scrolls and selects independently.
 // A split node has no buffer of its own, just two children and how the
-// parent rect divides between them. Splitting/closing panes and switching
-// buffers are later commits; for now there is always exactly one leaf.
+// parent rect divides between them.
 // ---------------------------------------------------------------------------
 typedef enum { WIN_LEAF, WIN_SPLIT_RIGHT, WIN_SPLIT_BELOW } WindowKind;
 
@@ -79,6 +88,7 @@ typedef struct Window {
     int id;
     WindowKind kind;
     struct Window *parent;
+    Rect rect; // both kinds: this window's on-screen share, set by computeLayout
     // WIN_LEAF only (see the Buffer comment above for why these are
     // `win_`-prefixed rather than bare text/cursor/... names):
     Buffer *buf;
@@ -93,6 +103,10 @@ typedef struct Window {
     // Visible text columns, refreshed each frame; used for wrap-aware
     // vertical moves.
     size_t win_view_cols;
+    // The cursor value scroll-to-cursor last ran for, in this pane -- mirrors
+    // the old single global `prev_cursor` local in main(), now per-window so
+    // each pane's own scroll-follow only fires when *its* cursor moved.
+    size_t win_prev_cursor;
     // WIN_SPLIT_* only:
     struct Window *a, *b; // a = left/top child, b = right/bottom child
     float split_ratio;
@@ -150,6 +164,7 @@ static Window *windowCreateLeaf(Buffer *buf) {
     w->id = next_window_id++;
     w->kind = WIN_LEAF;
     w->parent = NULL;
+    w->rect = (Rect){ 0, 0, 0, 0 }; // set for real by computeLayout before first use
     w->buf = buf;
     w->win_cursor = 0;
     w->win_anchor = 0;
@@ -158,6 +173,7 @@ static Window *windowCreateLeaf(Buffer *buf) {
     w->win_wrap = true;
     w->win_page_lines = 1;
     w->win_view_cols = 1;
+    w->win_prev_cursor = 1; // != win_cursor's initial 0, forces an initial scroll-follow
     w->a = w->b = NULL;
     w->split_ratio = 0.5f;
     return w;
@@ -307,6 +323,9 @@ static void detectCtrlTaps(void);
 static void handlePrefix(bool ctrl);
 static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap);
 static void drawHelp(float char_w, float line_h, float win_w, float win_h, char *tmp, size_t tmp_cap);
+static void computeLayout(Window *w, Rect r);
+static Window *windowAtPoint(Window *w, float mx, float my);
+static Metrics computeMetricsForRect(Rect r, float char_w, float line_h, float margin_x, float margin_y);
 
 // --- small helpers -----------------------------------------------------
 static bool isCont(unsigned char byte) { return (byte & 0xC0) == 0x80; }
@@ -1218,7 +1237,7 @@ static bool pressed(int key) { return platformKeyPressed(key) || platformKeyPres
 static size_t offsetFromMouse(Metrics m) {
     float mx, my;
     platformMousePos(&mx, &my);
-    float rf = (my - CFG_MARGIN_Y) / m.line_h;
+    float rf = (my - m.origin_y - CFG_MARGIN_Y) / m.line_h;
     if (rf < 0) rf = 0;
     float cf = (mx - m.text_x0) / m.char_w + 0.5f;
     if (cf < 0) cf = 0;
@@ -1770,6 +1789,239 @@ static size_t digitCount(size_t n) {
     return d;
 }
 
+// --- multi-pane layout and rendering ----------------------------------------
+// Recomputes every window's on-screen Rect from `r` (the whole area
+// available to the window tree, i.e. the OS window minus the one shared
+// minibuffer/echo strip at the very bottom -- see main()). A leaf's rect is
+// its own pane; a split node's rect is only ever consulted by windowAtPoint,
+// to find the boundary between its two children.
+static void computeLayout(Window *w, Rect r) {
+    w->rect = r;
+    if (w->kind == WIN_LEAF) return;
+    if (w->kind == WIN_SPLIT_RIGHT) {
+        float aw = r.w * w->split_ratio;
+        computeLayout(w->a, (Rect){ r.x, r.y, aw, r.h });
+        computeLayout(w->b, (Rect){ r.x + aw, r.y, r.w - aw, r.h });
+    } else { // WIN_SPLIT_BELOW
+        float ah = r.h * w->split_ratio;
+        computeLayout(w->a, (Rect){ r.x, r.y, r.w, ah });
+        computeLayout(w->b, (Rect){ r.x, r.y + ah, r.w, r.h - ah });
+    }
+}
+// The leaf whose rect contains (mx, my) -- caller's job to first check the
+// point actually falls within the window tree's overall area (a click in
+// the shared minibuffer/status strip below it isn't a pane click at all).
+static Window *windowAtPoint(Window *w, float mx, float my) {
+    if (w->kind == WIN_LEAF) return w;
+    if (w->kind == WIN_SPLIT_RIGHT) {
+        float boundary = w->a->rect.x + w->a->rect.w;
+        return windowAtPoint(mx < boundary ? w->a : w->b, mx, my);
+    } else {
+        float boundary = w->a->rect.y + w->a->rect.h;
+        return windowAtPoint(my < boundary ? w->a : w->b, mx, my);
+    }
+}
+// A pane's own text-area metrics: gutter width depends on *its* buffer's
+// line count, visible rows/cols on *its* rect size -- the same computation
+// every single-window frame already did against the whole OS window, now
+// against one leaf's own rect. Caller must have already pointed
+// selected_window at the buffer `r` belongs to (lineCount() below reads
+// through the macros).
+static Metrics computeMetricsForRect(Rect r, float char_w, float line_h, float margin_x, float margin_y) {
+    float text_h = r.h - line_h; // bottom line_h reserved for this pane's own mode-line
+    size_t digits = digitCount(lineCount());
+    if (digits < 2) digits = 2;
+    float gutter_w = (float)(digits + 1) * char_w;
+    float text_x0 = r.x + margin_x + gutter_w;
+    size_t visible = floorToUsize((text_h - margin_y) / line_h);
+    if (visible < 1) visible = 1;
+    size_t visible_cols = floorToUsize((r.w - margin_x - gutter_w) / char_w);
+    if (visible_cols < 1) visible_cols = 1;
+    Metrics m = { char_w, line_h, text_x0, visible, visible_cols, r.y };
+    return m;
+}
+
+// Bundles the font/margin constants and scratch buffers every pane's draw
+// needs, purely to keep renderPane/drawWindowTree's own parameter lists
+// short -- none of it varies per pane.
+typedef struct {
+    float char_w, line_h, margin_x, margin_y;
+    char *num_tmp; size_t num_tmp_cap;
+    char *status_tmp; size_t status_tmp_cap;
+} DrawCtx;
+
+// Renders one leaf's pane at `r`: scroll-to-cursor (using this window's own
+// win_prev_cursor, so only a pane whose *own* cursor moved rescrolls),
+// then gutter/text/selection/caret, then its own mode-line strip along the
+// bottom. This is the exact single-pane logic every frame used to run
+// against the whole window, now run once per leaf -- entirely through the
+// macros (text/len/cursor/wrap/top_line/left_col/...), so the caller must
+// have already pointed selected_window at `w` (drawWindowTree does this the
+// same way editorBufferOpenFile/editorBufferSave temporarily repoint it).
+static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
+    Metrics m = computeMetricsForRect(r, dc->char_w, dc->line_h, dc->margin_x, dc->margin_y);
+    page_lines = m.visible;
+    view_cols = m.visible_cols;
+
+    // ---- scroll-to-cursor, only when *this* pane's cursor actually moved ----
+    if (cursor != w->win_prev_cursor) {
+        LineCol cp = cursorLineCol();
+        if (wrap) {
+            left_col = 0;
+            if (cp.line < top_line) top_line = cp.line;
+            size_t s = lineStartOfRow(top_line);
+            size_t used = cp.col / m.visible_cols;
+            {
+                size_t ss = s, l = top_line;
+                while (l < cp.line) {
+                    size_t e = lineEnd(ss);
+                    used += visRows(colsIn(ss, e), m.visible_cols);
+                    ss = e + 1;
+                    l++;
+                }
+            }
+            while (used >= m.visible && top_line < cp.line) {
+                size_t e = lineEnd(s);
+                used -= visRows(colsIn(s, e), m.visible_cols);
+                s = e + 1;
+                top_line++;
+            }
+        } else {
+            if (cp.line < top_line) top_line = cp.line;
+            if (cp.line >= top_line + m.visible) top_line = cp.line - m.visible + 1;
+            if (cp.col < left_col) left_col = cp.col;
+            if (cp.col >= left_col + m.visible_cols) left_col = cp.col - m.visible_cols + 1;
+        }
+        w->win_prev_cursor = cursor;
+    }
+
+    // ---- draw ----
+    size_t sel_a = selMin();
+    size_t sel_b = selMax();
+    LineCol cp = cursorLineCol();
+    bool blink_on = !CFG_CURSOR_BLINK ||
+                    fmod(platformTime() - blink_base, CFG_CURSOR_BLINK_PERIOD * 2) < CFG_CURSOR_BLINK_PERIOD;
+    bool show_caret = is_selected && mb_kind == MB_NONE && blink_on;
+    size_t digits = digitCount(lineCount());
+    if (digits < 2) digits = 2;
+
+    if (wrap) {
+        size_t caret_seg = cp.col / m.visible_cols;
+        float caret_y = -1;
+        size_t row = 0;
+        size_t li = top_line;
+        size_t s = lineStartOfRow(top_line);
+        while (row < m.visible) {
+            size_t e = lineEnd(s);
+            size_t segs = visRows(colsIn(s, e), m.visible_cols);
+            size_t seg = 0;
+            bool stop_outer = false;
+            while (seg < segs) {
+                if (row >= m.visible) { stop_outer = true; break; }
+                float y = r.y + dc->margin_y + (float)row * dc->line_h;
+                size_t seg_s = byteAtCol(s, e, seg * m.visible_cols);
+                size_t seg_e = byteAtCol(s, e, (seg + 1) * m.visible_cols);
+                if (li == cp.line && seg == caret_seg) caret_y = y;
+
+                if (sel_b > sel_a) {
+                    size_t a = clampz(sel_a, seg_s, seg_e);
+                    size_t b = clampz(sel_b, seg_s, seg_e);
+                    if (b > a) platformDrawRect(
+                        m.text_x0 + (float)colsIn(seg_s, a) * dc->char_w, y,
+                        (float)colsIn(a, b) * dc->char_w, dc->line_h, CFG_COLOR_SELECTION);
+                }
+                if (seg == 0) {
+                    int np = snprintf(dc->num_tmp, dc->num_tmp_cap, "%zu", li + 1);
+                    size_t npu = np > 0 ? (size_t)np : 0;
+                    float nx = r.x + dc->margin_x + (float)(npu < digits ? digits - npu : 0) * dc->char_w;
+                    drawStr(dc->num_tmp, dc->char_w, nx, y, CFG_COLOR_GUTTER);
+                }
+                drawCells(dc->char_w, m.text_x0, y, seg_s, seg_e, CFG_COLOR_FG);
+                row++; seg++;
+            }
+            if (stop_outer) break;
+            li++;
+            if (e >= len) break;
+            s = e + 1;
+        }
+        if (show_caret && caret_y >= 0) {
+            float cx = m.text_x0 + (float)(cp.col % m.visible_cols) * dc->char_w;
+            platformDrawRect(cx, caret_y, 2, dc->line_h, CFG_COLOR_CURSOR);
+        }
+    } else {
+        size_t li = 0, s = 0;
+        for (;;) {
+            size_t e = lineEnd(s);
+            if (li >= top_line && li < top_line + m.visible) {
+                size_t row = li - top_line;
+                float y = r.y + dc->margin_y + (float)row * dc->line_h;
+                if (sel_b > sel_a) {
+                    size_t a = clampz(sel_a, s, e);
+                    size_t b = clampz(sel_b, s, e);
+                    if (b > a) {
+                        size_t ca = satsub(colsIn(s, a), left_col);
+                        size_t cb = satsub(colsIn(s, b), left_col);
+                        if (cb > ca) platformDrawRect(
+                            m.text_x0 + (float)ca * dc->char_w, y,
+                            (float)(cb - ca) * dc->char_w, dc->line_h, CFG_COLOR_SELECTION);
+                    }
+                }
+                int np = snprintf(dc->num_tmp, dc->num_tmp_cap, "%zu", li + 1);
+                size_t npu = np > 0 ? (size_t)np : 0;
+                float nx = r.x + dc->margin_x + (float)(npu < digits ? digits - npu : 0) * dc->char_w;
+                drawStr(dc->num_tmp, dc->char_w, nx, y, CFG_COLOR_GUTTER);
+                size_t vis_start = byteAtCol(s, e, left_col);
+                drawCells(dc->char_w, m.text_x0, y, vis_start, e, CFG_COLOR_FG);
+            }
+            li++;
+            if (e >= len) break;
+            s = e + 1;
+        }
+        if (show_caret && cp.line >= top_line && cp.line < top_line + m.visible && cp.col >= left_col) {
+            size_t row = cp.line - top_line;
+            float cx = m.text_x0 + (float)(cp.col - left_col) * dc->char_w;
+            float cy = r.y + dc->margin_y + (float)row * dc->line_h;
+            platformDrawRect(cx, cy, 2, dc->line_h, CFG_COLOR_CURSOR);
+        }
+    }
+
+    // this pane's own mode-line strip (a shared minibuffer/echo strip below
+    // the whole window tree, drawn once by drawMinibuffer, covers the rest)
+    float status_y = r.y + r.h - dc->line_h;
+    platformDrawRect(r.x, status_y, r.w, dc->line_h, CFG_COLOR_STATUS_BG);
+    int slen = snprintf(dc->status_tmp, dc->status_tmp_cap, "%s%s%s  |  Ln %zu, Col %zu  |  %zu bytes",
+                         (is_selected && modal) ? "[MODAL]  " : "", filename, dirty ? " *" : "", cp.line + 1, cp.col + 1, len);
+    // drawStr has no notion of a clip rect, so a status line longer than
+    // this (possibly half-window-wide, once split) pane is truncated to fit
+    // -- unlike the single full-width pane this logic used to always draw
+    // into, a narrow split pane makes overflowing into the *next* pane's
+    // own mode-line (drawn right after, at the same y) a routine case, not
+    // an edge case, and the result reads as visually garbled overlapping
+    // text for both.
+    size_t max_chars = floorToUsize((r.w - dc->margin_x) / dc->char_w);
+    size_t max_bytes = max_chars < dc->status_tmp_cap ? max_chars : dc->status_tmp_cap - 1;
+    if (slen > 0 && (size_t)slen > max_bytes) dc->status_tmp[max_bytes] = 0;
+    drawStr(slen > 0 ? dc->status_tmp : "te", dc->char_w, r.x + dc->margin_x, status_y + 2, CFG_COLOR_STATUS_FG);
+}
+// Walks the whole window tree (pre-order over leaves, matching
+// editorWindowIdAt's reading order), rendering each pane in turn.
+// Temporarily repoints selected_window at whichever leaf is being drawn --
+// same "swap, reuse the macro-driven logic, swap back" pattern
+// editorBufferOpenFile/editorBufferSave already use -- so renderPane's
+// macro-based text/cursor/wrap/... reads always mean *that* pane's buffer,
+// not necessarily the truly-selected one.
+static void drawWindowTree(Window *w, const DrawCtx *dc) {
+    if (w->kind == WIN_LEAF) {
+        Window *saved = selected_window;
+        selected_window = w;
+        renderPane(w, w->rect, w == saved, dc);
+        selected_window = saved;
+        return;
+    }
+    drawWindowTree(w->a, dc);
+    drawWindowTree(w->b, dc);
+}
+
 // Resolve UnifontExMono.ttf next to the running executable and read it whole
 // into a heap buffer kept for the program's lifetime (glyphs.c's FreeType
 // rasterizer is handed the raw bytes via FT_New_Memory_Face, not a path).
@@ -1944,6 +2196,7 @@ static Window *windowSplit(Window *target, WindowKind kind) {
     parent->id = next_window_id++;
     parent->kind = kind;
     parent->parent = target->parent;
+    parent->rect = (Rect){ 0, 0, 0, 0 }; // set for real by computeLayout before first use
     parent->buf = NULL;
     parent->a = target;
     parent->b = windowCreateLeaf(target->buf);
@@ -2199,7 +2452,6 @@ int main(int argc, char **argv) {
     static char line_tmp[8192];
     static char status_tmp[256];
     static char num_tmp[16];
-    size_t prev_cursor = 1; // force first ensure-visible
 
     while (running) {
         platformPollEvents();
@@ -2220,23 +2472,34 @@ int main(int argc, char **argv) {
             swallow_char_frames = 3;
         }
 
-        // ---- layout metrics (two bottom lines reserved: status + minibuffer) ----
+        // ---- layout (one shared minibuffer/echo strip along the bottom; the
+        // rest of the window is the pane tree) ----
         float win_w, win_h;
         platformScreenSize(&win_w, &win_h);
-        float status_y = win_h - 2 * line_h;
         float mb_y = win_h - line_h;
-        size_t total_lines = lineCount();
-        size_t digits = digitCount(total_lines);
-        if (digits < 2) digits = 2;
-        float gutter_w = (float)(digits + 1) * char_w;
-        float text_x0 = margin_x + gutter_w;
-        size_t visible = floorToUsize((win_h - margin_y - 2 * line_h) / line_h);
-        if (visible < 1) visible = 1;
-        size_t visible_cols = floorToUsize((win_w - text_x0) / char_w);
-        if (visible_cols < 1) visible_cols = 1;
-        page_lines = visible;
-        view_cols = visible_cols;
-        Metrics metrics = { char_w, line_h, text_x0, visible, visible_cols };
+        Rect content = { 0, 0, win_w, win_h - line_h };
+        computeLayout(root_window, content);
+
+        // A click picks which pane becomes selected *before* metrics get
+        // computed below, so offsetFromMouse (inside handleInput) ends up
+        // using the newly-selected pane's own metrics, not the stale ones
+        // from whatever was selected a moment ago. A click in the shared
+        // minibuffer/status strip below the tree isn't a pane click.
+        if (help == HELP_NONE && mb_kind == MB_NONE && platformMouseLeftPressed()) {
+            float mx, my;
+            platformMousePos(&mx, &my);
+            if (my < content.h) {
+                Window *clicked = windowAtPoint(root_window, mx, my);
+                if (clicked != selected_window) {
+                    selected_window = clicked;
+                    noteActivity();
+                }
+            }
+        }
+
+        Metrics metrics = computeMetricsForRect(selected_window->rect, char_w, line_h, margin_x, margin_y);
+        page_lines = metrics.visible;
+        view_cols = metrics.visible_cols;
 
         // ---- input ----
         if (help != HELP_NONE) {
@@ -2286,157 +2549,13 @@ int main(int argc, char **argv) {
             }
         }
 
-        // ---- scroll: follow caret only when it actually moved ----
-        if (cursor != prev_cursor) {
-            LineCol cp = cursorLineCol();
-            if (wrap) {
-                left_col = 0;
-                if (cp.line < top_line) top_line = cp.line;
-                // Visual rows from top_line down to the caret's own row. Walk the
-                // lines once, then scroll down a line at a time (reusing the byte
-                // offset) until the caret fits -- no repeated scans from the start.
-                size_t s = lineStartOfRow(top_line);
-                size_t used = cp.col / visible_cols;
-                {
-                    size_t ss = s, l = top_line;
-                    while (l < cp.line) {
-                        size_t e = lineEnd(ss);
-                        used += visRows(colsIn(ss, e), visible_cols);
-                        ss = e + 1;
-                        l++;
-                    }
-                }
-                while (used >= visible && top_line < cp.line) {
-                    size_t e = lineEnd(s);
-                    used -= visRows(colsIn(s, e), visible_cols);
-                    s = e + 1;
-                    top_line++;
-                }
-            } else {
-                if (cp.line < top_line) top_line = cp.line;
-                if (cp.line >= top_line + visible) top_line = cp.line - visible + 1;
-                if (cp.col < left_col) left_col = cp.col;
-                if (cp.col >= left_col + visible_cols) left_col = cp.col - visible_cols + 1;
-            }
-            prev_cursor = cursor;
-        }
-
-        // ---- draw ----
+        // ---- draw: each pane handles its own scroll-to-cursor as it's
+        // visited (renderPane, via its window's own win_prev_cursor) ----
         platformBeginDrawing();
         platformClearBackground(CFG_COLOR_BG);
 
-        size_t sel_a = selMin();
-        size_t sel_b = selMax();
-        LineCol cp = cursorLineCol();
-        bool blink_on = !CFG_CURSOR_BLINK ||
-                        fmod(platformTime() - blink_base, CFG_CURSOR_BLINK_PERIOD * 2) < CFG_CURSOR_BLINK_PERIOD;
-        bool show_caret = mb_kind == MB_NONE && blink_on;
-
-        if (wrap) {
-            // Walk logical lines from top_line, laying each out across one or
-            // more visual rows of visible_cols columns. The caret position is
-            // captured during this walk so we don't rescan the buffer for it.
-            size_t caret_seg = cp.col / visible_cols;
-            float caret_y = -1;
-            size_t row = 0;
-            size_t li = top_line;
-            size_t s = lineStartOfRow(top_line);
-            while (row < visible) {
-                size_t e = lineEnd(s);
-                size_t segs = visRows(colsIn(s, e), visible_cols);
-                size_t seg = 0;
-                bool stop_outer = false;
-                while (seg < segs) {
-                    if (row >= visible) {
-                        stop_outer = true;
-                        break;
-                    }
-                    float y = margin_y + (float)row * line_h;
-                    size_t seg_s = byteAtCol(s, e, seg * visible_cols);
-                    size_t seg_e = byteAtCol(s, e, (seg + 1) * visible_cols);
-                    if (li == cp.line && seg == caret_seg) caret_y = y;
-
-                    if (sel_b > sel_a) {
-                        size_t a = clampz(sel_a, seg_s, seg_e);
-                        size_t b = clampz(sel_b, seg_s, seg_e);
-                        if (b > a) platformDrawRect(
-                            text_x0 + (float)colsIn(seg_s, a) * char_w,
-                            y,
-                            (float)colsIn(a, b) * char_w,
-                            line_h,
-                            CFG_COLOR_SELECTION);
-                    }
-
-                    if (seg == 0) {
-                        int np = snprintf(num_tmp, sizeof(num_tmp), "%zu", li + 1);
-                        size_t npu = np > 0 ? (size_t)np : 0;
-                        float nx = margin_x + (float)(npu < digits ? digits - npu : 0) * char_w;
-                        drawStr(num_tmp, char_w, nx, y, CFG_COLOR_GUTTER);
-                    }
-
-                    drawCells(char_w, text_x0, y, seg_s, seg_e, CFG_COLOR_FG);
-                    row++;
-                    seg++;
-                }
-                if (stop_outer) break;
-                li++;
-                if (e >= len) break;
-                s = e + 1;
-            }
-
-            if (show_caret && caret_y >= 0) {
-                float cx = text_x0 + (float)(cp.col % visible_cols) * char_w;
-                platformDrawRect(cx, caret_y, 2, line_h, CFG_COLOR_CURSOR);
-            }
-        } else {
-            size_t li = 0, s = 0;
-            for (;;) {
-                size_t e = lineEnd(s);
-                if (li >= top_line && li < top_line + visible) {
-                    size_t row = li - top_line;
-                    float y = margin_y + (float)row * line_h;
-
-                    if (sel_b > sel_a) {
-                        size_t a = clampz(sel_a, s, e);
-                        size_t b = clampz(sel_b, s, e);
-                        if (b > a) {
-                            size_t ca = satsub(colsIn(s, a), left_col);
-                            size_t cb = satsub(colsIn(s, b), left_col);
-                            if (cb > ca) platformDrawRect(
-                                text_x0 + (float)ca * char_w,
-                                y,
-                                (float)(cb - ca) * char_w,
-                                line_h,
-                                CFG_COLOR_SELECTION);
-                        }
-                    }
-
-                    int np = snprintf(num_tmp, sizeof(num_tmp), "%zu", li + 1);
-                    size_t npu = np > 0 ? (size_t)np : 0;
-                    float nx = margin_x + (float)(npu < digits ? digits - npu : 0) * char_w;
-                    drawStr(num_tmp, char_w, nx, y, CFG_COLOR_GUTTER);
-
-                    size_t vis_start = byteAtCol(s, e, left_col);
-                    drawCells(char_w, text_x0, y, vis_start, e, CFG_COLOR_FG);
-                }
-                li++;
-                if (e >= len) break;
-                s = e + 1;
-            }
-
-            if (show_caret && cp.line >= top_line && cp.line < top_line + visible && cp.col >= left_col) {
-                size_t row = cp.line - top_line;
-                float cx = text_x0 + (float)(cp.col - left_col) * char_w;
-                float cy = margin_y + (float)row * line_h;
-                platformDrawRect(cx, cy, 2, line_h, CFG_COLOR_CURSOR);
-            }
-        }
-
-        // status (mode) line
-        platformDrawRect(0, status_y, win_w, line_h, CFG_COLOR_STATUS_BG);
-        int slen = snprintf(status_tmp, sizeof(status_tmp), "%s%s%s  |  Ln %zu, Col %zu  |  %zu bytes",
-                             modal ? "[MODAL]  " : "", filename, dirty ? " *" : "", cp.line + 1, cp.col + 1, len);
-        drawStr(slen > 0 ? status_tmp : "te", char_w, margin_x, status_y + 2, CFG_COLOR_STATUS_FG);
+        DrawCtx dc = { char_w, line_h, margin_x, margin_y, num_tmp, sizeof(num_tmp), status_tmp, sizeof(status_tmp) };
+        drawWindowTree(root_window, &dc);
 
         drawMinibuffer(char_w, mb_y, line_tmp, sizeof(line_tmp));
 
