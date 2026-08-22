@@ -41,29 +41,128 @@ static char shot_path_buf[4096];
 static char *shot_path = "";
 
 // ---------------------------------------------------------------------------
-// Text buffer: a flat byte array. `cursor` is the caret; `anchor` marks the
-// other end of the selection (anchor == cursor means no selection). Columns
-// are measured in bytes, which is exact for ASCII and good enough here.
+// Buffer: one open file's content, a flat byte array (heap-allocated, TEXT_CAP
+// bytes) plus its own dirty/path identity. Columns are measured in bytes,
+// which is exact for ASCII and good enough here. Multiple windows may show
+// the same buffer; nothing here is per-window.
 // ---------------------------------------------------------------------------
-static unsigned char text[TEXT_CAP];
-static size_t len = 0;
-static size_t cursor = 0;
-static size_t anchor = 0;
-static bool dirty = false;
+// Field names are `buf_`-prefixed, distinct from the bare text/len/dirty/...
+// identifiers the macros below redirect -- every one of those macros
+// expands to a plain textual substitution, so an *unprefixed* field of the
+// same name would also get rewritten at every other `->` access anywhere in
+// this file (not just the intended selected_window->buf->... spelling),
+// breaking any future code that reaches into a Buffer/Window directly (e.g.
+// a buffer-list walk touching `b->dirty` on some other buffer).
+typedef struct Buffer {
+    int id;
+    unsigned char *buf_text;
+    size_t buf_len;
+    bool buf_dirty;
+    char buf_filename_buf[4096];
+    char *buf_filename;
+    bool buf_has_file; // false until associated with a real path
+    struct Buffer *next; // intrusive list, creation order
+} Buffer;
 
-static char filename_buf[4096];
-static char *filename = "untitled.txt";
-static bool has_file = false; // false until associated with a real path
+// ---------------------------------------------------------------------------
+// Window: one on-screen pane. A leaf shows a Buffer and owns that pane's own
+// view/interaction state (scroll position, wrap, cursor, selection) -- real
+// Emacs semantics: point and scroll position are per-window, not per-buffer,
+// so the same buffer open in two panes scrolls and selects independently.
+// A split node has no buffer of its own, just two children and how the
+// parent rect divides between them. Splitting/closing panes and switching
+// buffers are later commits; for now there is always exactly one leaf.
+// ---------------------------------------------------------------------------
+typedef enum { WIN_LEAF, WIN_SPLIT_RIGHT, WIN_SPLIT_BELOW } WindowKind;
 
-// View / interaction state.
-static size_t top_line = 0;
-static size_t left_col = 0;
-// Soft wrap: long logical lines continue on the next visual row instead of
-// running off the right edge. When on, horizontal scrolling (left_col) is off.
-static bool wrap = true;
-static size_t page_lines = 1;
-// Visible text columns, refreshed each frame; used for wrap-aware vertical moves.
-static size_t view_cols = 1;
+typedef struct Window {
+    int id;
+    WindowKind kind;
+    struct Window *parent;
+    // WIN_LEAF only (see the Buffer comment above for why these are
+    // `win_`-prefixed rather than bare text/cursor/... names):
+    Buffer *buf;
+    size_t win_cursor; // the caret
+    size_t win_anchor; // other end of the selection (== cursor: no selection)
+    size_t win_top_line, win_left_col;
+    // Soft wrap: long logical lines continue on the next visual row instead
+    // of running off the right edge. When on, horizontal scrolling
+    // (win_left_col) is off.
+    bool win_wrap;
+    size_t win_page_lines;
+    // Visible text columns, refreshed each frame; used for wrap-aware
+    // vertical moves.
+    size_t win_view_cols;
+    // WIN_SPLIT_* only:
+    struct Window *a, *b; // a = left/top child, b = right/bottom child
+    float split_ratio;
+} Window;
+
+static Buffer *buffer_list = NULL;
+static Window *root_window = NULL;
+static Window *selected_window = NULL; // receives keys; the caret blinks here
+static int next_buffer_id = 1;
+static int next_window_id = 1;
+
+// Every existing bit of buffer/view logic below (rendering, mouse hit-
+// testing, minibuffer, save/open, line/column math, ...) refers to "the
+// buffer" and "the view" by these bare names -- redirecting them through
+// the selected window/buffer here means reassigning `selected_window`
+// instantly reroutes everything, with no call-site changes needed anywhere
+// below. (`Cp.nbytes`, renamed from `.len` in the previous commit, is the
+// only identifier below that would otherwise have collided.)
+#define text          (selected_window->buf->buf_text)
+#define len           (selected_window->buf->buf_len)
+#define dirty         (selected_window->buf->buf_dirty)
+#define filename      (selected_window->buf->buf_filename)
+#define filename_buf  (selected_window->buf->buf_filename_buf)
+#define has_file      (selected_window->buf->buf_has_file)
+#define cursor        (selected_window->win_cursor)
+#define anchor        (selected_window->win_anchor)
+#define top_line      (selected_window->win_top_line)
+#define left_col      (selected_window->win_left_col)
+#define wrap          (selected_window->win_wrap)
+#define page_lines    (selected_window->win_page_lines)
+#define view_cols     (selected_window->win_view_cols)
+
+static Buffer *bufferCreate(void) {
+    Buffer *b = malloc(sizeof(Buffer));
+    b->id = next_buffer_id++;
+    b->buf_text = malloc(TEXT_CAP);
+    b->buf_len = 0;
+    b->buf_dirty = false;
+    b->buf_filename_buf[0] = 0;
+    b->buf_filename = "untitled.txt";
+    b->buf_has_file = false;
+    b->next = buffer_list;
+    buffer_list = b;
+    return b;
+}
+static Window *windowCreateLeaf(Buffer *buf) {
+    Window *w = malloc(sizeof(Window));
+    w->id = next_window_id++;
+    w->kind = WIN_LEAF;
+    w->parent = NULL;
+    w->buf = buf;
+    w->win_cursor = 0;
+    w->win_anchor = 0;
+    w->win_top_line = 0;
+    w->win_left_col = 0;
+    w->win_wrap = true;
+    w->win_page_lines = 1;
+    w->win_view_cols = 1;
+    w->a = w->b = NULL;
+    w->split_ratio = 0.5f;
+    return w;
+}
+// Creates the one starting buffer/window pair. Must run before anything
+// else touches the macros above -- including headless `--regex` mode, which
+// reads/writes the buffer just like the interactive path does -- so main()
+// calls this first, before even grepMode().
+static void bootstrapEditor(void) {
+    root_window = selected_window = windowCreateLeaf(bufferCreate());
+}
+
 // Sticky/goal column for vertical movement now lives in src/movement.pl
 // (goal_col_set/1, goal_col_val/1) -- a run of up/down moves tries to keep
 // the same on-screen column; any other action clears it (scriptClearGoalColumn).
@@ -1785,6 +1884,7 @@ size_t editorPageLines(void) { return page_lines; }
 size_t editorBufferLen(void) { return len; }
 
 int main(int argc, char **argv) {
+    bootstrapEditor(); // must run before anything touches the buffer/window macros
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits
 
     if (!loadFontFile()) {

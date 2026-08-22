@@ -518,6 +518,13 @@ static void test_script_hooks_fire_on_save_and_open(void) {
 }
 
 int main(void) {
+    // main.c's text/len/cursor/anchor/... are now macros onto the selected
+    // window's buffer (see the Buffer/Window comment block near the top of
+    // main.c) -- bootstrapEditor() creates the one buffer/window pair every
+    // test below implicitly operates on, the same role the old static
+    // globals played before this file #included main.c's structural change.
+    bootstrapEditor();
+
     // Undo/redo now goes through the Prolog engine (src/undo_history.pl),
     // so it needs one alive -- a nonexistent init.pl still loads
     // bootstrap.pl/default_bindings.pl/undo_history.pl, which is all any
