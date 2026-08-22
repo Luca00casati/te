@@ -78,9 +78,65 @@ static void test_retract_does_not_leak_program_arena(void) {
     prologDestroy(pl);
 }
 
+// The regression test for first-argument clause indexing (prolog.c's
+// buildPredIndex/mergeBySeq, triggered once a predicate passes
+// PROLOG_INDEX_MIN_CLAUSES clauses): a naive index that just concatenated
+// "keyed bucket, then wildcards" (or vice versa) instead of merging by
+// original assertion order would return solutions in the wrong order here
+// -- this is the one thing a full linear scan is guaranteed to get right
+// that a careless index implementation can silently get wrong.
+static void test_index_preserves_assertion_order(void) {
+    Prolog *pl = prologCreate();
+    prologSetErrorHandler(pl, onError, NULL);
+    // route(_, _) clauses (10, past the indexing threshold): keyed facts for
+    // a/b/target/target/target/c/d interleaved with wildcard (unbound first
+    // arg) facts, in this exact assertion order.
+    const char *facts[] = {
+        "assertz(route(a, va))",
+        "assertz(route(_, wa))",   // wildcard
+        "assertz(route(b, vb))",
+        "assertz(route(target, v1))",
+        "assertz(route(_, wb))",   // wildcard
+        "assertz(route(target, v2))",
+        "assertz(route(c, vc))",
+        "assertz(route(_, wc))",   // wildcard
+        "assertz(route(target, v3))",
+        "assertz(route(d, vd))",
+    };
+    for (size_t i = 0; i < sizeof facts / sizeof facts[0]; i++) CHECK(solveText(pl, facts[i]));
+
+    size_t mark = prologMark(pl);
+    PlTerm *g = prologParseTerm(pl, "findall(V, route(target, V), Results)");
+    CHECK(g != NULL);
+    bool ok = g && prologSolve(pl, g);
+    CHECK(ok);
+    if (ok) {
+        // Every route(_, ...) wildcard and every route(target, ...) fact
+        // matches, in the order they were asserted.
+        const char *expected[] = { "wa", "v1", "wb", "v2", "wc", "v3" };
+        size_t expectedCount = sizeof expected / sizeof expected[0];
+        PlTerm *results = prologArg(pl, g, 3);
+        size_t idx = 0;
+        PlTerm *cur = results;
+        while (prologIsList(pl, cur)) {
+            PlTerm *head, *tail;
+            CHECK(prologGetListHeadTail(pl, cur, &head, &tail));
+            const char *name = prologFunctorName(pl, head);
+            if (idx < expectedCount) CHECK(name && strcmp(name, expected[idx]) == 0);
+            idx++;
+            cur = tail;
+        }
+        CHECK(prologIsNil(pl, cur));
+        CHECK(idx == expectedCount);
+    }
+    prologReset(pl, mark);
+    prologDestroy(pl);
+}
+
 int main(void) {
     RUN(test_assert_retract_roundtrip);
     RUN(test_retract_does_not_leak_program_arena);
+    RUN(test_index_preserves_assertion_order);
 
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

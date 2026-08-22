@@ -122,9 +122,33 @@ typedef struct Clause {
     struct Clause *next;
 } Clause;
 
+// First-argument clause index (see buildPredIndex/indexedClauseIterFor):
+// clauses whose head's first argument is a ground atom/int at assert time go
+// into the bucket for that value; everything else (unbound, compound,
+// float) goes into `wildcard`, since it could unify with any call. `seq` is
+// each clause's position in `pred`'s original assertion order -- both a
+// bucket and `wildcard` stay `seq`-ascending (built by one forward walk), so
+// a lookup can merge a bucket with `wildcard` back into exactly the order a
+// full linear scan would have tried them in. Keys are plain values (never a
+// Term*/Clause* held across a compaction), so the index itself is safe to
+// keep around; only the Clause* payloads go stale, on any assert/retract or
+// program-arena compaction -- see pred->indexDirty.
+typedef struct { Clause *c; size_t seq; } IndexedClause;
+typedef struct {
+    bool isInt; Atom atomKey; long intKey;
+    IndexedClause *items; size_t count, cap;
+} IndexBucket;
+typedef struct {
+    IndexBucket *buckets; size_t bucketCount, bucketCap;
+    IndexedClause *wildcard; size_t wildcardCount, wildcardCap;
+} PredIndex;
+
 typedef struct Predicate {
     Atom functor; int arity;
     Clause *first, *last;
+    size_t clauseCount;
+    PredIndex *index;  // lazily built; NULL until the first indexed lookup
+    bool indexDirty;   // true after any assert/retract/compaction
 } Predicate;
 
 typedef struct { Predicate **items; size_t count, cap; } PredTable;
@@ -650,6 +674,7 @@ static Predicate *findOrCreatePred(Prolog *pl, Atom functor, int arity) {
     if (p) return p;
     p = malloc(sizeof(Predicate));
     p->functor = functor; p->arity = arity; p->first = p->last = NULL;
+    p->clauseCount = 0; p->index = NULL; p->indexDirty = true;
     if (pl->preds.count == pl->preds.cap) {
         pl->preds.cap = pl->preds.cap ? pl->preds.cap * 2 : 16;
         pl->preds.items = realloc(pl->preds.items, pl->preds.cap * sizeof(Predicate *));
@@ -668,6 +693,91 @@ static void addClause(Prolog *pl, Term *head, Term *body, bool atEnd) {
     if (!pred->first) { pred->first = pred->last = c; }
     else if (atEnd) { pred->last->next = c; pred->last = c; }
     else { c->next = pred->first; pred->first = c; }
+    pred->clauseCount++;
+    pred->indexDirty = true;
+}
+
+// --- first-argument clause indexing ----------------------------------------
+// Only ever consulted for a predicate past PROLOG_INDEX_MIN_CLAUSES clauses
+// (below that, solve()'s own linear scan is already fine and this is never
+// built at all), and only helps a call whose first argument is already
+// bound (e.g. a lookup like `blocal(SomeBufId, Key, Value)`) -- script.c's
+// today's key_binding/3 dispatch calls with Key itself unbound (it findalls
+// every binding, then filters in C), so this doesn't speed that specific
+// call up; it's aimed at future bound-first-argument lookups against a
+// growing fact base (buffer-local variables keyed by buffer id, etc.).
+#define PROLOG_INDEX_MIN_CLAUSES 8
+
+static void freePredIndex(PredIndex *idx) {
+    for (size_t i = 0; i < idx->bucketCount; i++) free(idx->buckets[i].items);
+    free(idx->buckets);
+    free(idx->wildcard);
+    idx->buckets = NULL; idx->bucketCount = idx->bucketCap = 0;
+    idx->wildcard = NULL; idx->wildcardCount = idx->wildcardCap = 0;
+}
+static void pushIndexed(IndexedClause **items, size_t *count, size_t *cap, Clause *c, size_t seq) {
+    if (*count == *cap) {
+        *cap = *cap ? *cap * 2 : 4;
+        *items = realloc(*items, *cap * sizeof(IndexedClause));
+    }
+    (*items)[(*count)++] = (IndexedClause){ c, seq };
+}
+static IndexBucket *findOrCreateBucket(PredIndex *idx, bool isInt, Atom atomKey, long intKey) {
+    for (size_t i = 0; i < idx->bucketCount; i++) {
+        IndexBucket *b = &idx->buckets[i];
+        if (b->isInt == isInt && (isInt ? b->intKey == intKey : b->atomKey == atomKey)) return b;
+    }
+    if (idx->bucketCount == idx->bucketCap) {
+        idx->bucketCap = idx->bucketCap ? idx->bucketCap * 2 : 4;
+        idx->buckets = realloc(idx->buckets, idx->bucketCap * sizeof(IndexBucket));
+    }
+    IndexBucket *b = &idx->buckets[idx->bucketCount++];
+    *b = (IndexBucket){ isInt, atomKey, intKey, NULL, 0, 0 };
+    return b;
+}
+// A clause's own (unbound, freshly-stored) first argument: T_ATOM/T_INT are
+// indexable; T_VAR (e.g. `foo(X) :- ...`), T_CMP, and T_FLT first arguments
+// could unify with any call's first argument, so they're never indexed --
+// they go in `wildcard` and are considered for every lookup.
+static bool clauseIndexKey(Term *arg0, bool *isInt, Atom *atomKey, long *intKey) {
+    if (arg0->tag == T_ATOM) { *isInt = false; *atomKey = arg0->u.atom; return true; }
+    if (arg0->tag == T_INT) { *isInt = true; *intKey = arg0->u.i; return true; }
+    return false;
+}
+// Full rebuild from scratch -- called lazily, only when a predicate past the
+// size threshold is about to be looked up with a bound first argument and
+// its index is missing/stale (pred->indexDirty, set by addClause/
+// nativeRetract/compactProgram). Config-scale predicate sizes make a full
+// rebuild-on-demand simpler and just as fast as trying to patch an existing
+// index incrementally.
+static void buildPredIndex(Predicate *pred) {
+    if (!pred->index) pred->index = calloc(1, sizeof(PredIndex));
+    PredIndex *idx = pred->index;
+    freePredIndex(idx);
+    size_t seq = 0;
+    for (Clause *c = pred->first; c; c = c->next, seq++) {
+        bool isInt = false; Atom atomKey = 0; long intKey = 0;
+        bool indexable = c->head->tag == T_CMP &&
+                          clauseIndexKey(c->head->u.cmp.args[0], &isInt, &atomKey, &intKey);
+        if (indexable) {
+            IndexBucket *b = findOrCreateBucket(idx, isInt, atomKey, intKey);
+            pushIndexed(&b->items, &b->count, &b->cap, c, seq);
+        } else {
+            pushIndexed(&idx->wildcard, &idx->wildcardCount, &idx->wildcardCap, c, seq);
+        }
+    }
+    pred->indexDirty = false;
+}
+// Two-pointer merge of two seq-ascending arrays, preserving original
+// assertion order -- the detail that makes indexing fully transparent: a
+// bucket's candidates interleaved with the wildcards is exactly the subset
+// (in the same relative order) a full scan of pred->first would have tried.
+static size_t mergeBySeq(IndexedClause *out, IndexedClause *a, size_t an, IndexedClause *b, size_t bn) {
+    size_t i = 0, j = 0, k = 0;
+    while (i < an && j < bn) out[k++] = (a[i].seq < b[j].seq) ? a[i++] : b[j++];
+    while (i < an) out[k++] = a[i++];
+    while (j < bn) out[k++] = b[j++];
+    return k;
 }
 
 static NativeEntry *lookupNative(Prolog *pl, Atom functor, int arity) {
@@ -806,8 +916,38 @@ static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skct
     Predicate *pred = findPred(pl, functor, arity);
     if (!pred) throwExistenceError(pl, "procedure", mkSlash(pl, functor, arity));
 
+    // First-argument indexing: only kicks in for a predicate past the size
+    // threshold with a bound (atom/int) first argument in *this call* --
+    // anything else falls through to the exact linear scan below (`clauses`
+    // stays NULL), which is always correct: the index only ever narrows
+    // which subset of pred->first gets tried, never changes what a full
+    // scan would have found or the order it would have tried them in.
+    IndexedClause *clauses = NULL; // non-NULL => indexed candidate list, seq-ordered
+    size_t clauseTotal = 0;
+    if (arity > 0 && pred->clauseCount > PROLOG_INDEX_MIN_CLAUSES) {
+        Term *a0 = deref(args[0]);
+        bool isInt = false; Atom atomKey = 0; long intKey = 0;
+        if (clauseIndexKey(a0, &isInt, &atomKey, &intKey)) {
+            if (pred->indexDirty || !pred->index) buildPredIndex(pred);
+            IndexBucket *bucket = NULL;
+            for (size_t i = 0; i < pred->index->bucketCount; i++) {
+                IndexBucket *b = &pred->index->buckets[i];
+                if (b->isInt == isInt && (isInt ? b->intKey == intKey : b->atomKey == atomKey)) { bucket = b; break; }
+            }
+            size_t bn = bucket ? bucket->count : 0, wn = pred->index->wildcardCount;
+            clauses = malloc((bn + wn) * sizeof(IndexedClause));
+            clauseTotal = mergeBySeq(clauses, bucket ? bucket->items : NULL, bn, pred->index->wildcard, wn);
+        }
+    }
+
     long myBarrier = pl->nextBarrier++;
-    for (Clause *c = pred->first; c; c = c->next) {
+    Clause *plainNext = clauses ? NULL : pred->first;
+    size_t indexedPos = 0;
+    for (;;) {
+        Clause *c = clauses ? (indexedPos < clauseTotal ? clauses[indexedPos++].c : NULL)
+                             : plainNext;
+        if (!c) break;
+        if (!clauses) plainNext = c->next;
         size_t tmark = pl->trail.top;
         VarMap map = { 0 };
         Term *h = copyTermRec(&pl->query, c->head, &map);
@@ -818,11 +958,12 @@ static bool solve(Prolog *pl, Term *goal, long barrier, SolveCont sc, void *skct
         Term *b = c->body ? copyTermRec(&pl->query, c->body, &map) : NULL;
         freeVarMap(&map);
         bool r = b ? solve(pl, b, myBarrier, sc, skctx) : sc(pl, skctx);
-        if (pl->cutSignal == myBarrier) { pl->cutSignal = 0; return r; }
-        if (r) return true;
-        if (pl->cutSignal) return false;
+        if (pl->cutSignal == myBarrier) { pl->cutSignal = 0; free(clauses); return r; }
+        if (r) { free(clauses); return true; }
+        if (pl->cutSignal) { free(clauses); return false; }
         undoTrailTo(pl, tmark);
     }
+    free(clauses);
     return false;
 }
 
@@ -923,6 +1064,8 @@ static bool nativeRetract(Prolog *pl, Term **a, int arity, void *ctx) {
         if (unify(pl, headPat, ch) && unify(pl, bodyPat, cb)) {
             if (prev) prev->next = c->next; else pred->first = c->next;
             if (pred->last == c) pred->last = prev;
+            pred->clauseCount--;
+            pred->indexDirty = true;
             pl->retractsSinceCompact++;
             return true;
         }
@@ -961,6 +1104,10 @@ static void compactProgram(Prolog *pl) {
         }
         pred->first = newFirst;
         pred->last = newLast;
+        // Every Clause* this predicate's index (if any) points at just went
+        // stale -- relinking above replaced every node -- so force a rebuild
+        // on next lookup rather than leaving dangling payload pointers.
+        pred->indexDirty = true;
     }
     arenaFreeAll(&pl->program);
     pl->program = fresh;
@@ -1764,7 +1911,10 @@ void prologDestroy(Prolog *pl) {
     arenaFreeAll(&pl->query);
     for (size_t i = 0; i < pl->atoms.count; i++) free(pl->atoms.names[i]);
     free(pl->atoms.names);
-    for (size_t i = 0; i < pl->preds.count; i++) free(pl->preds.items[i]);
+    for (size_t i = 0; i < pl->preds.count; i++) {
+        if (pl->preds.items[i]->index) { freePredIndex(pl->preds.items[i]->index); free(pl->preds.items[i]->index); }
+        free(pl->preds.items[i]);
+    }
     free(pl->preds.items);
     free(pl->natives.items);
     free(pl->trail.items);
