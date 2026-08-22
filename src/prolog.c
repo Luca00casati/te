@@ -2033,6 +2033,15 @@ bool prologGetInt(Prolog *pl, PlTerm *t, long *out) {
     *out = t->u.i;
     return true;
 }
+// Accepts either an int or a float term (coercing an int to double) -- a
+// config fact like cfg(font_size, 16) shouldn't have to be written 16.0
+// just to satisfy a caller that only wants a double.
+bool prologGetFloat(Prolog *pl, PlTerm *t, double *out) {
+    (void)pl; t = deref(t);
+    if (t->tag == T_FLT) { *out = t->u.f; return true; }
+    if (t->tag == T_INT) { *out = (double)t->u.i; return true; }
+    return false;
+}
 
 PlTerm *prologMkAtom(Prolog *pl, const char *name) { return mkAtomRaw(&pl->query, internAtom(pl, name)); }
 PlTerm *prologMkCodeList(Prolog *pl, const char *chars, size_t len) { return mkCodeList(pl, chars, len); }

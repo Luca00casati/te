@@ -162,6 +162,7 @@ wins — clauses are tried in assertion order, first match runs:
 | `te_insert(Text)` | Insert text at the cursor (or replace the selection) — goes through the same path as typing, so undo/redo work |
 | `te_text(Text)` | Unify `Text` with the whole buffer, as a list of character codes |
 | `te_cursor(Pos)` / `te_set_cursor(Pos)` | Get/set the cursor as a byte offset |
+| `cfg(Key, Value)` | Override a startup config knob (window size, font, colors, tab, ...) — see Configuration below |
 
 `Key` is a single-character atom (`g`, `3`) or one of `space`, `enter`,
 `kp_enter`, `tab`, `backspace`, `delete`, `escape`. `Mod` is `any`, `ctrl`,
@@ -176,6 +177,16 @@ handler predicate — there's no general way to tell whether an arbitrary
 goal "is navigation") is blocked, same as it always was for a non-nav
 built-in. An uncaught error inside a handler is echoed rather than
 crashing `te`.
+
+**Configuration** is also plain facts: window size/title, font size, margins,
+colors, the tab-insert text, buffer capacity, undo depth, and the mouse
+wheel's scroll speed are `cfg(Key, Value)` facts in `scripts/config.pl`
+(`scripts/config.pl` itself documents every key), read once at startup
+before the window opens — there's no live-reload, so a change takes effect
+on the next launch. A `cfg/2` fact in `init.pl` (e.g.
+`cfg(color_bg, rgb(20, 20, 28)).`) overrides the matching default the same
+way a `key_binding/3` override does, since `init.pl` loads first. Colors are
+`rgb(R, G, B)` or `rgba(R, G, B, A)` compound terms, 0–255 per channel.
 
 The engine (`src/prolog.h`/`prolog.c`) is a small **from-scratch, ISO-flavored
 Prolog**, not a wrapper around an external library: facts/rules, unification,
@@ -288,8 +299,16 @@ Two suites, both under `tests/`:
   embedded into the binary; `te` exits with a clear error if it can't find it.
   Every `scripts/*.pl` file (below) is loaded the same way, for the same reason:
   adding or editing one is just a file change, not a rebuild.
-- `src/config.h` — all the tunables (window size, font size, colors, tab,
-  buffer capacity). Font size is 16 by default; multiples of 16 stay crisp.
+- `scripts/config.pl` — all the tunables (window size, font size, colors,
+  tab, buffer capacity, undo depth, ...), as plain `cfg(Key, Value)` facts
+  read once at startup (`main.c`'s `loadConfig`, via `script.c`'s
+  `scriptCfgFloat`/`Long`/`Bool`/`Text`/`Color`) into C globals before the
+  window opens -- replaces what used to be a `src/config.h` of `#define`s.
+  Loaded *after* the user's `init.pl` (same schedule as
+  `scripts/default_bindings.pl`), so a `cfg/2` fact in `init.pl` overrides
+  the built-in default here. Font size is 16 by default; multiples of 16
+  stay crisp. A missing/broken `cfg/2` fact falls back to the same default
+  `scripts/config.pl` itself ships, one knob at a time.
 - `src/binding.h` — the `Action`/`Mod` enums every key ultimately resolves to
   and their human-readable labels; not a key → action map anymore (that's
   `scripts/default_bindings.pl` now — see Scripting above). The leader is armed
@@ -349,8 +368,10 @@ Two suites, both under `tests/`:
   primitive typing uses; `te_apply_replace/3`, shared with search/replace's
   undo-recording edits), alongside a handful of small raw-buffer primitives
   added for this file (`te_byte_at/2`, `te_buffer_range/3`, `te_copy_range/2`
-  straight to the clipboard, `te_clipboard_get/1`, `te_tab/1` for
-  `CFG_TAB`); this is the decision logic on top, including restoring the
+  straight to the clipboard, `te_clipboard_get/1`); `indent/0` reads its
+  inserted text straight from `cfg(tab, _)` (`scripts/config.pl`) rather
+  than a native round-trip. This is the decision logic on top, including
+  restoring the
   cursor to where it belongs when that differs from `te_apply_replace`'s own
   default (the end of what it just spliced in) — e.g. `open-line-above`
   landing on the new blank line rather than after the newline it inserted.

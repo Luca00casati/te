@@ -689,19 +689,22 @@ static void test_script_hooks_fire_on_save_and_open(void) {
 }
 
 int main(void) {
+    // Same order real main() uses (see its comment): scriptInitFromFile
+    // before bootstrapEditor, since loadConfig's text_cap has to be in
+    // place before the first bufferCreate() malloc's a Buffer's text. A
+    // nonexistent init.pl still loads bootstrap.pl/default_bindings.pl/
+    // scripts/config.pl/undo_history.pl, which is all any test below the
+    // script-specific ones needs. Torn down again right before those (each
+    // sets up its own fixture-specific engine).
+    scriptInitFromFile("tests/fixtures/does_not_exist.pl");
+    loadConfig();
+
     // main.c's text/len/cursor/anchor/... are now macros onto the selected
     // window's buffer (see the Buffer/Window comment block near the top of
     // main.c) -- bootstrapEditor() creates the one buffer/window pair every
     // test below implicitly operates on, the same role the old static
     // globals played before this file #included main.c's structural change.
     bootstrapEditor();
-
-    // Undo/redo now goes through the Prolog engine (scripts/undo_history.pl),
-    // so it needs one alive -- a nonexistent init.pl still loads
-    // bootstrap.pl/default_bindings.pl/undo_history.pl, which is all any
-    // test below the script-specific ones needs. Torn down again right
-    // before those (each sets up its own fixture-specific engine).
-    scriptInitFromFile("tests/fixtures/does_not_exist.pl");
 
     RUN(test_utf8_roundtrip);
     RUN(test_utf8_malformed_falls_back);

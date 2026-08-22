@@ -88,6 +88,14 @@ check_todo_markers :-
     ;   te_echo("no TODO markers found")
     ).
 
+% te's own startup tunables (window size, font, colors, tab, ...) are
+% cfg(Key, Value) facts too (scripts/config.pl documents every key) --
+% loaded after this file, so a cfg/2 fact here overrides the built-in
+% default, same as key_binding/3 above. Read once at startup, before the
+% window opens; not live-reloaded.
+cfg(color_bg, rgb(20, 20, 28)).
+cfg(tab, "  ").
+
 % numlist/3 + maplist/3 + foldl/4: build "1, 2, 3, ..., 10" as a small
 % generate -> transform -> reduce pipeline and insert it.
 key_binding(o, ctrl_shift, insert_number_range).

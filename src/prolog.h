@@ -98,6 +98,7 @@ PlTerm *prologArg(Prolog *pl, PlTerm *t, int i);            // 1-based
 // into a fresh query-arena buffer; an atom is returned as-is (no copy).
 bool prologGetText(Prolog *pl, PlTerm *t, const char **out_chars, size_t *out_len);
 bool prologGetInt(Prolog *pl, PlTerm *t, long *out);
+bool prologGetFloat(Prolog *pl, PlTerm *t, double *out); // accepts int or float
 
 // --- Term construction (used by native predicates to build outputs, and by
 // callers that need to build a goal from caller-supplied data without

@@ -34,7 +34,6 @@
 
 #include "platform.h"
 #include "binding.h"
-#include "config.h"
 #include "editor.h"
 #include "prolog.h"
 
@@ -329,10 +328,6 @@ static bool nTeBufferLen(Prolog *p, PlTerm *args[], int arity, void *ctx) {
 
 // --- editing (scripts/editing.pl) ----------------------------------------------
 
-static bool nTeTab(Prolog *p, PlTerm *args[], int arity, void *ctx) {
-    (void)arity; (void)ctx;
-    return prologUnify(p, args[0], prologMkCodeList(p, CFG_TAB, strlen(CFG_TAB)));
-}
 // The byte at `pos`, 0-255 -- fails if pos is out of range, so callers like
 // move_line_left can write a single `te_byte_at(Ls, B), ... -> ...` guard
 // instead of a separate bounds check.
@@ -565,6 +560,9 @@ static bool resolvePlDir(char *out, size_t outsz) {
 // a missing init.pl (whatever it defined just won't be there -- errors
 // from code that depended on it are echoed, not fatal); only bootstrap.pl
 // itself (the caller's job, before this runs) is treated as mandatory.
+// config.pl is excluded for the same reason default_bindings.pl is: it
+// loads on its own schedule, after the user's init.pl, so a cfg/2 fact in
+// init.pl overrides the built-in default (see scriptInit).
 static void consultCoreLibrary(const char *dir) {
     DIR *d = opendir(dir);
     if (!d) return;
@@ -573,12 +571,100 @@ static void consultCoreLibrary(const char *dir) {
         const char *name = ent->d_name;
         size_t len = strlen(name);
         if (len < 4 || strcmp(name + len - 3, ".pl") != 0) continue;
-        if (strcmp(name, "bootstrap.pl") == 0 || strcmp(name, "default_bindings.pl") == 0) continue;
+        if (strcmp(name, "bootstrap.pl") == 0 || strcmp(name, "default_bindings.pl") == 0
+            || strcmp(name, "config.pl") == 0) continue;
         char path[4160];
         snprintf(path, sizeof path, "%s/%s", dir, name);
         prologConsultFile(pl, path);
     }
     closedir(d);
+}
+
+// --- config (scripts/config.pl) ----------------------------------------
+// One-shot accessors for main.c's loadConfig, called a handful of times at
+// startup only (not from any per-frame path), so no caching -- just solve
+// `cfg(Key, X)` fresh in its own mark/reset and pull X out. Each leaves the
+// caller's `out` untouched and returns false if the key doesn't exist or
+// the value isn't the shape asked for (a missing cfg/2 fact, a string where
+// a color was expected, ...), matching every other Prolog-facing surface's
+// graceful-degrade behavior on a missing/broken fact -- main.c falls back
+// to its own compiled-in default in that case, the same value config.pl
+// itself ships as a default.
+static bool cfgQuery(const char *key, PlTerm **out, size_t *mark) {
+    if (!pl) return false;
+    char goalSrc[64];
+    snprintf(goalSrc, sizeof goalSrc, "cfg(%s, X)", key);
+    *mark = prologMark(pl);
+    PlTerm *g = prologParseTerm(pl, goalSrc);
+    if (!g || !prologSolve(pl, g)) { prologReset(pl, *mark); return false; }
+    *out = prologArg(pl, g, 2);
+    return true;
+}
+bool scriptCfgFloat(const char *key, float *out) {
+    size_t mark; PlTerm *v; bool ok = false;
+    if (cfgQuery(key, &v, &mark)) {
+        double d;
+        if (prologGetFloat(pl, v, &d)) { *out = (float)d; ok = true; }
+        prologReset(pl, mark);
+    }
+    return ok;
+}
+bool scriptCfgLong(const char *key, long *out) {
+    size_t mark; PlTerm *v; bool ok = false;
+    if (cfgQuery(key, &v, &mark)) {
+        ok = prologGetInt(pl, v, out);
+        prologReset(pl, mark);
+    }
+    return ok;
+}
+bool scriptCfgBool(const char *key, bool *out) {
+    size_t mark; PlTerm *v; bool ok = false;
+    if (cfgQuery(key, &v, &mark)) {
+        const char *name = prologFunctorName(pl, v);
+        if (name && strcmp(name, "true") == 0) { *out = true; ok = true; }
+        else if (name && strcmp(name, "false") == 0) { *out = false; ok = true; }
+        prologReset(pl, mark);
+    }
+    return ok;
+}
+bool scriptCfgText(const char *key, char *out, size_t outsz) {
+    size_t mark; PlTerm *v; bool ok = false;
+    if (cfgQuery(key, &v, &mark)) {
+        const char *chars; size_t len;
+        if (prologGetText(pl, v, &chars, &len)) {
+            if (len >= outsz) len = outsz - 1;
+            memcpy(out, chars, len);
+            out[len] = 0;
+            ok = true;
+        }
+        prologReset(pl, mark);
+    }
+    return ok;
+}
+// Value is rgb(R, G, B) or rgba(R, G, B, A), 0-255 per channel; `a` defaults
+// to 255 for rgb/3.
+bool scriptCfgColor(const char *key, unsigned char *r, unsigned char *g, unsigned char *b, unsigned char *a) {
+    size_t mark; PlTerm *v; bool ok = false;
+    if (cfgQuery(key, &v, &mark)) {
+        const char *fn = prologFunctorName(pl, v);
+        long rv, gv, bv, av = 255;
+        if (fn && strcmp(fn, "rgb") == 0
+            && prologGetInt(pl, prologArg(pl, v, 1), &rv)
+            && prologGetInt(pl, prologArg(pl, v, 2), &gv)
+            && prologGetInt(pl, prologArg(pl, v, 3), &bv)) {
+            *r = (unsigned char)rv; *g = (unsigned char)gv; *b = (unsigned char)bv; *a = 255;
+            ok = true;
+        } else if (fn && strcmp(fn, "rgba") == 0
+            && prologGetInt(pl, prologArg(pl, v, 1), &rv)
+            && prologGetInt(pl, prologArg(pl, v, 2), &gv)
+            && prologGetInt(pl, prologArg(pl, v, 3), &bv)
+            && prologGetInt(pl, prologArg(pl, v, 4), &av)) {
+            *r = (unsigned char)rv; *g = (unsigned char)gv; *b = (unsigned char)bv; *a = (unsigned char)av;
+            ok = true;
+        }
+        prologReset(pl, mark);
+    }
+    return ok;
 }
 
 static bool scriptSetup(void) {
@@ -610,7 +696,6 @@ static bool scriptSetup(void) {
     prologRegisterNative(pl, "te_view_cols", 1, nTeViewCols, NULL);
     prologRegisterNative(pl, "te_page_lines", 1, nTePageLines, NULL);
     prologRegisterNative(pl, "te_buffer_len", 1, nTeBufferLen, NULL);
-    prologRegisterNative(pl, "te_tab", 1, nTeTab, NULL);
     prologRegisterNative(pl, "te_byte_at", 2, nTeByteAt, NULL);
     prologRegisterNative(pl, "te_buffer_range", 3, nTeBufferRange, NULL);
     prologRegisterNative(pl, "te_clipboard_get", 1, nTeClipboardGet, NULL);
@@ -643,6 +728,18 @@ static bool scriptSetup(void) {
     consultCoreLibrary(plDir);
     return true;
 }
+// Consults default_bindings.pl then config.pl from plDir -- both load on
+// their own schedule, after the caller's init.pl, so a user key_binding/
+// leader_binding/command/cfg fact at the same key/mod/name/config-key is
+// tried first (see script.h, scripts/config.pl).
+static void consultDefaultsAndConfig(void) {
+    char dbPath[4160];
+    snprintf(dbPath, sizeof dbPath, "%s/default_bindings.pl", plDir);
+    prologConsultFile(pl, dbPath);
+    char cfgPath[4160];
+    snprintf(cfgPath, sizeof cfgPath, "%s/config.pl", plDir);
+    prologConsultFile(pl, cfgPath);
+}
 bool scriptInit(void) {
     if (!scriptSetup()) return false;
     char path[4096];
@@ -652,19 +749,13 @@ bool scriptInit(void) {
     else if (home && home[0]) snprintf(path, sizeof path, "%s/.config/te/init.pl", home);
     else path[0] = 0;
     if (path[0]) prologConsultFile(pl, path);
-    // Loaded *after* the user's init.pl, so a user key_binding/leader_binding/
-    // command fact at the same key/mod/name is tried first (see script.h).
-    char dbPath[4160];
-    snprintf(dbPath, sizeof dbPath, "%s/default_bindings.pl", plDir);
-    prologConsultFile(pl, dbPath);
+    consultDefaultsAndConfig();
     return true;
 }
 bool scriptInitFromFile(const char *path) {
     if (!scriptSetup()) return false;
     prologConsultFile(pl, path);
-    char dbPath[4160];
-    snprintf(dbPath, sizeof dbPath, "%s/default_bindings.pl", plDir);
-    prologConsultFile(pl, dbPath);
+    consultDefaultsAndConfig();
     return true;
 }
 void scriptShutdown(void) {

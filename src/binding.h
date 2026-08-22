@@ -16,7 +16,7 @@ typedef enum {
     ACTION_NEWLINE,
     ACTION_OPEN_LINE_BELOW,       // C-Enter: blank line below, cursor moves there
     ACTION_OPEN_LINE_ABOVE,       // C-Shift-Enter: blank line above, cursor moves there
-    ACTION_INDENT,                // insert CFG_TAB
+    ACTION_INDENT,                // insert cfg(tab, _) (scripts/config.pl)
     ACTION_DELETE_BACK,
     ACTION_DELETE_FORWARD,
     ACTION_MOVE_LEFT,

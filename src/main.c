@@ -12,21 +12,79 @@
 #include <pcre2.h>
 
 #include "platform.h"
-#include "config.h"
 #include "binding.h"
 #include "glyphs.h"
 #include "editor.h"
 #include "script.h"
 
-// Text buffer capacity (the buffer is a fixed array this big).
-#define TEXT_CAP CFG_MAX_FILE_BYTES
+// --- configuration ------------------------------------------------------
+// All the former src/config.h #define knobs are now scripts/config.pl
+// cfg(Key, Value) facts, read once into these globals by loadConfig()
+// (called from main() right after scriptInit succeeds, before the window
+// opens or the first Buffer is created -- text_cap in particular has to be
+// in place before bootstrapEditor's first bufferCreate()). Each initializer
+// below is the exact fallback used if scripts/config.pl is missing or a
+// given cfg/2 fact is absent/malformed -- loadConfig only overwrites a
+// global when scriptCfgFloat/Long/Bool/Text/Color actually finds a valid
+// fact, so a partial or broken config.pl degrades gracefully to these same
+// defaults, one knob at a time, same as every other Prolog-facing surface.
+static int cfg_target_fps = 60;
+static char cfg_window_title[64] = "te";
+static float cfg_font_size = 16.0f;
+static float cfg_font_line_gap = 4.0f;
+static float cfg_margin_x = 8.0f;
+static float cfg_margin_y = 6.0f;
+static size_t text_cap = 1 << 20; // buffer capacity: a Buffer's text is malloc'd this big
+static int cfg_scroll_speed = 3;
+static bool cfg_cursor_blink = true;
+static double cfg_cursor_blink_period = 0.5;
+static size_t cfg_undo_depth = 4096;
+static Color cfg_color_bg        = { 30, 30, 38, 255 };
+static Color cfg_color_fg        = { 220, 220, 230, 255 };
+static Color cfg_color_cursor    = { 120, 200, 255, 255 };
+static Color cfg_color_selection = { 58, 78, 110, 255 };
+static Color cfg_color_gutter    = { 95, 95, 120, 255 };
+static Color cfg_color_status_bg = { 50, 50, 64, 255 };
+static Color cfg_color_status_fg = { 180, 200, 220, 255 };
+static Color cfg_color_overlay   = { 0, 0, 0, 160 };
+
+static void loadColorCfg(const char *key, Color *out) {
+    unsigned char r, g, b, a;
+    if (scriptCfgColor(key, &r, &g, &b, &a)) *out = (Color){ r, g, b, a };
+}
+// Called once, right after scriptInit/scriptInitFromFile succeeds (so
+// scripts/config.pl -- and any cfg/2 override in the user's init.pl -- has
+// already been consulted) and before anything reads one of the globals
+// above.
+static void loadConfig(void) {
+    long l; bool b; float f;
+    if (scriptCfgLong("target_fps", &l)) cfg_target_fps = (int)l;
+    scriptCfgText("window_title", cfg_window_title, sizeof cfg_window_title);
+    if (scriptCfgFloat("font_size", &f)) cfg_font_size = f;
+    if (scriptCfgFloat("font_line_gap", &f)) cfg_font_line_gap = f;
+    if (scriptCfgFloat("margin_x", &f)) cfg_margin_x = f;
+    if (scriptCfgFloat("margin_y", &f)) cfg_margin_y = f;
+    if (scriptCfgLong("max_file_bytes", &l) && l > 0) text_cap = (size_t)l;
+    if (scriptCfgLong("scroll_speed", &l)) cfg_scroll_speed = (int)l;
+    if (scriptCfgBool("cursor_blink", &b)) cfg_cursor_blink = b;
+    if (scriptCfgFloat("cursor_blink_period", &f)) cfg_cursor_blink_period = (double)f;
+    if (scriptCfgLong("undo_depth", &l) && l > 0) cfg_undo_depth = (size_t)l;
+    loadColorCfg("color_bg", &cfg_color_bg);
+    loadColorCfg("color_fg", &cfg_color_fg);
+    loadColorCfg("color_cursor", &cfg_color_cursor);
+    loadColorCfg("color_selection", &cfg_color_selection);
+    loadColorCfg("color_gutter", &cfg_color_gutter);
+    loadColorCfg("color_status_bg", &cfg_color_status_bg);
+    loadColorCfg("color_status_fg", &cfg_color_status_fg);
+    loadColorCfg("color_overlay", &cfg_color_overlay);
+}
 
 // --- small value types -------------------------------------------------
 typedef struct { size_t line, col; } LineCol;
 typedef struct { uint32_t cp; size_t nbytes; } Cp;
 // `origin_y` is the owning pane's rect.y (0 when there's only ever the one
 // full-window pane) -- text_x0 already bakes in the pane's rect.x, but the
-// row math (offsetFromMouse, CFG_MARGIN_Y) needs the y origin explicitly.
+// row math (offsetFromMouse, cfg_margin_y) needs the y origin explicitly.
 typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; float origin_y; } Metrics;
 
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
@@ -47,7 +105,7 @@ static char shot_path_buf[4096];
 static char *shot_path = "";
 
 // ---------------------------------------------------------------------------
-// Buffer: one open file's content, a flat byte array (heap-allocated, TEXT_CAP
+// Buffer: one open file's content, a flat byte array (heap-allocated, text_cap
 // bytes) plus its own dirty/path identity. Columns are measured in bytes,
 // which is exact for ASCII and good enough here. Multiple windows may show
 // the same buffer; nothing here is per-window.
@@ -146,7 +204,7 @@ static int next_window_id = 1;
 static Buffer *bufferCreate(void) {
     Buffer *b = malloc(sizeof(Buffer));
     b->id = next_buffer_id++;
-    b->buf_text = malloc(TEXT_CAP);
+    b->buf_text = malloc(text_cap);
     b->buf_len = 0;
     b->buf_dirty = false;
     b->buf_filename_buf[0] = 0;
@@ -377,7 +435,7 @@ static void replaceRange(size_t start, size_t end, const unsigned char *bytes, s
 // scripts/undo_history.pl owns the history bookkeeping (coalescing a run of
 // typing, evicting the oldest entry past the depth cap, clearing redo).
 static void edit(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
-    if (len - (end - start) + bytes_len > TEXT_CAP) return;
+    if (len - (end - start) + bytes_len > text_cap) return;
     size_t cur_before = cursor;
     size_t cur_after = start + bytes_len;
     scriptRecordEdit(start, text + start, end - start, bytes, bytes_len, cur_before, cur_after);
@@ -693,7 +751,7 @@ static bool readFileInto(const char *path) {
         return false;
     }
     long size = ftell(f);
-    if (size < 0 || (size_t)size > TEXT_CAP) {
+    if (size < 0 || (size_t)size > text_cap) {
         fclose(f);
         len = 0;
         return false;
@@ -1275,7 +1333,7 @@ static bool pressed(int key) { return platformKeyPressed(key) || platformKeyPres
 static size_t offsetFromMouse(Metrics m) {
     float mx, my;
     platformMousePos(&mx, &my);
-    float rf = (my - m.origin_y - CFG_MARGIN_Y) / m.line_h;
+    float rf = (my - m.origin_y - cfg_margin_y) / m.line_h;
     if (rf < 0) rf = 0;
     float cf = (mx - m.text_x0) / m.char_w + 0.5f;
     if (cf < 0) cf = 0;
@@ -1320,11 +1378,11 @@ static void bufApp(unsigned char *buf, size_t buf_cap, size_t *n, const unsigned
     memcpy(buf + *n, s, m);
     *n += m;
 }
-// Read all of stdin into the text buffer (up to TEXT_CAP bytes).
+// Read all of stdin into the text buffer (up to text_cap bytes).
 static bool readStdin(void) {
     size_t total = 0;
-    while (total < TEXT_CAP) {
-        ssize_t n = read(0, text + total, TEXT_CAP - total);
+    while (total < text_cap) {
+        ssize_t n = read(0, text + total, text_cap - total);
         if (n < 0) return false;
         if (n == 0) break; // EOF
         total += (size_t)n;
@@ -1356,7 +1414,7 @@ static int grep(const char *pattern, const char *input, const char *output) {
     }
     // Collect one line per matching line. Matches are position-sorted, so a
     // running line number only moves forward.
-    size_t buf_cap = 2 * TEXT_CAP;
+    size_t buf_cap = 2 * text_cap;
     unsigned char *buf = malloc(buf_cap);
     if (!buf) return 2;
     size_t w = 0;
@@ -1512,7 +1570,7 @@ static void handleInput(bool ctrl, Metrics m) {
     if (wheel != 0) {
         // With wrap, lines vary in height, so just stop at the last line.
         size_t max_top = wrap ? (lineCount() - 1) : (lineCount() > m.visible ? lineCount() - m.visible : 0);
-        long long nt = (long long)top_line - (long long)wheel * CFG_SCROLL_SPEED;
+        long long nt = (long long)top_line - (long long)wheel * cfg_scroll_speed;
         if (nt < 0) nt = 0;
         if (nt > (long long)max_top) nt = (long long)max_top;
         top_line = (size_t)nt;
@@ -1605,7 +1663,7 @@ static void handlePrefix(bool ctrl) {
 static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
     if (mb_kind == MB_NONE) {
         if (prefix_pending) {
-            drawStr("Ctrlx2-", char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
+            drawStr("Ctrlx2-", char_w, cfg_margin_x, y + 2, cfg_color_fg);
             return;
         }
         // echo area
@@ -1613,7 +1671,7 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
             size_t n = echo_len < tmp_cap - 1 ? echo_len : tmp_cap - 1;
             memcpy(tmp, echo_buf, n);
             tmp[n] = 0;
-            drawStr(tmp, char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_STATUS_FG);
+            drawStr(tmp, char_w, cfg_margin_x, y + 2, cfg_color_status_fg);
         }
         return;
     }
@@ -1622,21 +1680,21 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
         scriptSearchStatus(&index, &count, &truncated, &bad_regex);
         char buf[128];
         int n = snprintf(buf, sizeof(buf), "Replace? Enter=yes  n/p=skip  Esc=done  (%zu/%zu)", index + 1, count);
-        drawStr(n > 0 ? buf : "Replace?", char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
+        drawStr(n > 0 ? buf : "Replace?", char_w, cfg_margin_x, y + 2, cfg_color_fg);
         return;
     }
     // prompt
-    drawStr(mb_prompt, char_w, CFG_MARGIN_X, y + 2, CFG_COLOR_FG);
+    drawStr(mb_prompt, char_w, cfg_margin_x, y + 2, cfg_color_fg);
     float prompt_w = strWidth(mb_prompt, char_w);
     if (mb_kind == MB_TEXT_PROMPT) {
         size_t n = mb_len < tmp_cap - 1 ? mb_len : tmp_cap - 1;
         memcpy(tmp, mb_input, n);
         tmp[n] = 0;
-        float x0 = CFG_MARGIN_X + prompt_w;
-        drawStr(tmp, char_w, x0, y + 2, CFG_COLOR_FG);
+        float x0 = cfg_margin_x + prompt_w;
+        drawStr(tmp, char_w, x0, y + 2, cfg_color_fg);
         // minibuffer caret (solid)
         float cx = x0 + (float)mb_cursor * char_w;
-        platformDrawRect(cx, y + 2, 2, CFG_FONT_SIZE, CFG_COLOR_CURSOR);
+        platformDrawRect(cx, y + 2, 2, cfg_font_size, cfg_color_cursor);
         // search / replace-pattern prompt: show the live match count after query
         if ((mb_intent == MBI_SEARCH || mb_intent == MBI_REPLACE_FROM) && mb_len > 0) {
             size_t index, count; bool truncated, bad_regex;
@@ -1646,7 +1704,7 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
             else if (count == 0) snprintf(st, sizeof(st), "(no match)");
             else snprintf(st, sizeof(st), "(%zu/%zu%s)", index + 1, count, truncated ? "+" : "");
             float sx = x0 + (float)mb_len * char_w + 2 * char_w;
-            drawStr(st, char_w, sx, y + 2, CFG_COLOR_GUTTER);
+            drawStr(st, char_w, sx, y + 2, cfg_color_gutter);
         }
         // command prompt: dim list of matching completions (Tab to fill in)
         if (mb_intent == MBI_COMMAND) {
@@ -1664,7 +1722,7 @@ static void drawMinibuffer(float char_w, float y, char *tmp, size_t tmp_cap) {
             }
             hint[hl] = 0;
             float hx = x0 + (float)mb_len * char_w + 2 * char_w;
-            drawStr(hint, char_w, hx, y + 2, CFG_COLOR_GUTTER);
+            drawStr(hint, char_w, hx, y + 2, cfg_color_gutter);
         }
     }
 }
@@ -1744,14 +1802,14 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
     float block_h = (float)(content + 2) * line_h + pad * 2;
     float top = status_y - block_h;
     if (top < 0) top = 0;
-    platformDrawRect(0, top, win_w, status_y - top, CFG_COLOR_STATUS_BG);
-    platformDrawRect(0, top, win_w, 1, CFG_COLOR_GUTTER);
+    platformDrawRect(0, top, win_w, status_y - top, cfg_color_status_bg);
+    platformDrawRect(0, top, win_w, 1, cfg_color_gutter);
 
-    float x = CFG_MARGIN_X + 8;
+    float x = cfg_margin_x + 8;
     float y = status_y - block_h + pad;
 
     if (help == HELP_NAV) {
-        drawStr("Navigation & editing keys  (Ctrlx2 n)", char_w, x, y, CFG_COLOR_CURSOR);
+        drawStr("Navigation & editing keys  (Ctrlx2 n)", char_w, x, y, cfg_color_cursor);
         y += line_h;
         size_t total = scriptTopBindingCount();
         const char *shown[ACTION_COUNT + 64];
@@ -1783,11 +1841,11 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
             }
             int n = snprintf(tmp, tmp_cap, "%-22.*s%s", (int)clen, cbuf, label);
             if (n < 0) continue;
-            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
+            drawStr(tmp, char_w, x, y, cfg_color_fg);
             y += line_h;
         }
     } else if (help == HELP_COMMANDS) {
-        drawStr("Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", char_w, x, y, CFG_COLOR_CURSOR);
+        drawStr("Commands  (Ctrlx2 = double-tap Ctrl, then h)  --  then name, or chord", char_w, x, y, cfg_color_cursor);
         y += line_h;
         size_t command_count = scriptCommandCount();
         size_t leader_count = scriptLeaderBindingCount();
@@ -1806,13 +1864,13 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
             }
             int n = snprintf(tmp, tmp_cap, "%-16s%s", name, chord);
             if (n < 0) continue;
-            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
+            drawStr(tmp, char_w, x, y, cfg_color_fg);
             y += line_h;
         }
-        drawStr("Ctrlx3 (triple-tap Ctrl) : type a command", char_w, x, y, CFG_COLOR_GUTTER);
+        drawStr("Ctrlx3 (triple-tap Ctrl) : type a command", char_w, x, y, cfg_color_gutter);
         y += line_h;
     } else { // HELP_BUFFERS
-        drawStr("Buffers  ('*' = current, '*' after the name = unsaved changes)", char_w, x, y, CFG_COLOR_CURSOR);
+        drawStr("Buffers  ('*' = current, '*' after the name = unsaved changes)", char_w, x, y, cfg_color_cursor);
         y += line_h;
         int current = editorCurrentBufferId();
         size_t count = editorBufferCount();
@@ -1825,11 +1883,11 @@ static void drawHelp(float char_w, float line_h, float win_w, float win_h, char 
             int n = snprintf(tmp, tmp_cap, "%s%s%s", id == current ? "* " : "  ",
                               name ? name : "?", buf_dirty ? " *" : "");
             if (n < 0) continue;
-            drawStr(tmp, char_w, x, y, CFG_COLOR_FG);
+            drawStr(tmp, char_w, x, y, cfg_color_fg);
             y += line_h;
         }
     }
-    drawStr("Press any key to close", char_w, x, y, CFG_COLOR_GUTTER);
+    drawStr("Press any key to close", char_w, x, y, cfg_color_gutter);
 }
 
 // Floor a float to size_t, treating <= 0 as 0.
@@ -1956,8 +2014,8 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
     size_t sel_a = selMin();
     size_t sel_b = selMax();
     LineCol cp = cursorLineCol();
-    bool blink_on = !CFG_CURSOR_BLINK ||
-                    fmod(platformTime() - blink_base, CFG_CURSOR_BLINK_PERIOD * 2) < CFG_CURSOR_BLINK_PERIOD;
+    bool blink_on = !cfg_cursor_blink ||
+                    fmod(platformTime() - blink_base, cfg_cursor_blink_period * 2) < cfg_cursor_blink_period;
     bool show_caret = is_selected && mb_kind == MB_NONE && blink_on;
     size_t digits = digitCount(lineCount());
     if (digits < 2) digits = 2;
@@ -1985,15 +2043,15 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
                     size_t b = clampz(sel_b, seg_s, seg_e);
                     if (b > a) platformDrawRect(
                         m.text_x0 + (float)colsIn(seg_s, a) * dc->char_w, y,
-                        (float)colsIn(a, b) * dc->char_w, dc->line_h, CFG_COLOR_SELECTION);
+                        (float)colsIn(a, b) * dc->char_w, dc->line_h, cfg_color_selection);
                 }
                 if (seg == 0) {
                     int np = snprintf(dc->num_tmp, dc->num_tmp_cap, "%zu", li + 1);
                     size_t npu = np > 0 ? (size_t)np : 0;
                     float nx = r.x + dc->margin_x + (float)(npu < digits ? digits - npu : 0) * dc->char_w;
-                    drawStr(dc->num_tmp, dc->char_w, nx, y, CFG_COLOR_GUTTER);
+                    drawStr(dc->num_tmp, dc->char_w, nx, y, cfg_color_gutter);
                 }
-                drawCells(dc->char_w, m.text_x0, y, seg_s, seg_e, CFG_COLOR_FG);
+                drawCells(dc->char_w, m.text_x0, y, seg_s, seg_e, cfg_color_fg);
                 row++; seg++;
             }
             if (stop_outer) break;
@@ -2003,7 +2061,7 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
         }
         if (show_caret && caret_y >= 0) {
             float cx = m.text_x0 + (float)(cp.col % m.visible_cols) * dc->char_w;
-            platformDrawRect(cx, caret_y, 2, dc->line_h, CFG_COLOR_CURSOR);
+            platformDrawRect(cx, caret_y, 2, dc->line_h, cfg_color_cursor);
         }
     } else {
         size_t li = 0, s = 0;
@@ -2020,15 +2078,15 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
                         size_t cb = satsub(colsIn(s, b), left_col);
                         if (cb > ca) platformDrawRect(
                             m.text_x0 + (float)ca * dc->char_w, y,
-                            (float)(cb - ca) * dc->char_w, dc->line_h, CFG_COLOR_SELECTION);
+                            (float)(cb - ca) * dc->char_w, dc->line_h, cfg_color_selection);
                     }
                 }
                 int np = snprintf(dc->num_tmp, dc->num_tmp_cap, "%zu", li + 1);
                 size_t npu = np > 0 ? (size_t)np : 0;
                 float nx = r.x + dc->margin_x + (float)(npu < digits ? digits - npu : 0) * dc->char_w;
-                drawStr(dc->num_tmp, dc->char_w, nx, y, CFG_COLOR_GUTTER);
+                drawStr(dc->num_tmp, dc->char_w, nx, y, cfg_color_gutter);
                 size_t vis_start = byteAtCol(s, e, left_col);
-                drawCells(dc->char_w, m.text_x0, y, vis_start, e, CFG_COLOR_FG);
+                drawCells(dc->char_w, m.text_x0, y, vis_start, e, cfg_color_fg);
             }
             li++;
             if (e >= len) break;
@@ -2038,14 +2096,14 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
             size_t row = cp.line - top_line;
             float cx = m.text_x0 + (float)(cp.col - left_col) * dc->char_w;
             float cy = r.y + dc->margin_y + (float)row * dc->line_h;
-            platformDrawRect(cx, cy, 2, dc->line_h, CFG_COLOR_CURSOR);
+            platformDrawRect(cx, cy, 2, dc->line_h, cfg_color_cursor);
         }
     }
 
     // this pane's own mode-line strip (a shared minibuffer/echo strip below
     // the whole window tree, drawn once by drawMinibuffer, covers the rest)
     float status_y = r.y + r.h - dc->line_h;
-    platformDrawRect(r.x, status_y, r.w, dc->line_h, CFG_COLOR_STATUS_BG);
+    platformDrawRect(r.x, status_y, r.w, dc->line_h, cfg_color_status_bg);
     int slen = snprintf(dc->status_tmp, dc->status_tmp_cap, "%s%s%s  |  Ln %zu, Col %zu  |  %zu bytes",
                          (is_selected && modal) ? "[MODAL]  " : "", filename, dirty ? " *" : "", cp.line + 1, cp.col + 1, len);
     // drawStr has no notion of a clip rect, so a status line longer than
@@ -2058,7 +2116,7 @@ static void renderPane(Window *w, Rect r, bool is_selected, const DrawCtx *dc) {
     size_t max_chars = floorToUsize((r.w - dc->margin_x) / dc->char_w);
     size_t max_bytes = max_chars < dc->status_tmp_cap ? max_chars : dc->status_tmp_cap - 1;
     if (slen > 0 && (size_t)slen > max_bytes) dc->status_tmp[max_bytes] = 0;
-    drawStr(slen > 0 ? dc->status_tmp : "te", dc->char_w, r.x + dc->margin_x, status_y + 2, CFG_COLOR_STATUS_FG);
+    drawStr(slen > 0 ? dc->status_tmp : "te", dc->char_w, r.x + dc->margin_x, status_y + 2, cfg_color_status_fg);
 }
 // Walks the whole window tree (pre-order over leaves, matching
 // editorWindowIdAt's reading order), rendering each pane in turn.
@@ -2145,7 +2203,7 @@ void editorSetSelExtend(bool extend) { sel_extend = extend; }
 void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
     replaceRange(start, end, bytes, bytes_len);
 }
-size_t editorUndoDepth(void) { return CFG_UNDO_DEPTH; }
+size_t editorUndoDepth(void) { return cfg_undo_depth; }
 size_t editorGetAnchor(void) { return anchor; }
 void editorSetSelection(size_t anchor_pos, size_t cursor_pos) {
     if (anchor_pos > len) anchor_pos = len;
@@ -2453,6 +2511,19 @@ bool editorWindowDeleteOthers(int win_id) {
 }
 
 int main(int argc, char **argv) {
+    // Loaded first, before anything else starts up: scripts/config.pl (and
+    // any cfg/2 override in the user's init.pl, consulted first -- see
+    // script.c's scriptInit) has to be in place before bootstrapEditor's
+    // first bufferCreate() malloc's a Buffer's text using text_cap, and
+    // before platformInit/glyphs_init read their own cfg_* globals. This is
+    // also still before the command-line file (if any) is opened below, so
+    // an init.pl hook(post_open, ...) fires for it same as always.
+    if (!scriptInit()) {
+        fprintf(stderr, "te: cannot load scripts/bootstrap.pl (expected next to the executable, or ./scripts when run from the repo)\n");
+        return 1;
+    }
+    loadConfig();
+
     bootstrapEditor(); // must run before anything touches the buffer/window macros
     grepMode(argc, argv); // `te --regex <pattern> <file>` prints matches and exits
 
@@ -2464,26 +2535,16 @@ int main(int argc, char **argv) {
     // platformInit opens a hidden placeholder window, sizes it to half the
     // primary display, then reveals it -- the user never sees the
     // placeholder size.
-    platformInit(CFG_WINDOW_TITLE, CFG_TARGET_FPS);
+    platformInit(cfg_window_title, cfg_target_fps);
 
-    float font_size = CFG_FONT_SIZE; // mutable: Ctrl +/- zooms it
+    float font_size = cfg_font_size; // mutable: Ctrl +/- zooms it
     glyphs_init(font_bytes, font_bytes_len, (int)font_size, platformGLContext());
 
     float char_w = glyphs_advance('M');
-    float line_h = font_size + CFG_FONT_LINE_GAP;
-    float margin_x = CFG_MARGIN_X;
-    float margin_y = CFG_MARGIN_Y;
+    float line_h = font_size + cfg_font_line_gap;
+    float margin_x = cfg_margin_x;
+    float margin_y = cfg_margin_y;
     blink_base = platformTime();
-
-    // Loaded before the command-line file (if any) is opened, so an
-    // init.pl hook(post_open, ...) also fires for it.
-    if (!scriptInit()) {
-        fprintf(stderr, "te: cannot load scripts/bootstrap.pl (expected next to the executable, or ./scripts when run from the repo)\n");
-        glyphs_deinit();
-        platformShutdown();
-        free(font_bytes);
-        return 1;
-    }
 
     // Arguments (parsed after window init so echo works): an optional file to
     // open, and `--screenshot <frames> <path>`. (--regex is handled headlessly
@@ -2600,7 +2661,7 @@ int main(int argc, char **argv) {
                     font_size = ns;
                     glyphs_reset((int)font_size);
                     char_w = glyphs_advance('M');
-                    line_h = font_size + CFG_FONT_LINE_GAP;
+                    line_h = font_size + cfg_font_line_gap;
                     echoFmt("Font %dpx", (int)font_size);
                 }
             }
@@ -2609,7 +2670,7 @@ int main(int argc, char **argv) {
         // ---- draw: each pane handles its own scroll-to-cursor as it's
         // visited (renderPane, via its window's own win_prev_cursor) ----
         platformBeginDrawing();
-        platformClearBackground(CFG_COLOR_BG);
+        platformClearBackground(cfg_color_bg);
 
         DrawCtx dc = { char_w, line_h, margin_x, margin_y, num_tmp, sizeof(num_tmp), status_tmp, sizeof(status_tmp) };
         drawWindowTree(root_window, &dc);

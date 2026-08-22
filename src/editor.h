@@ -43,8 +43,8 @@ void editorSetSelExtend(bool extend);
 // actually applying a stored edit record. Mirrors the existing static
 // replaceRange in main.c exactly.
 void editorReplaceRange(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
-// CFG_UNDO_DEPTH (src/config.h), exposed so scripts/undo_history.pl's eviction
-// cap has one source of truth instead of a second copy of the number.
+// cfg(undo_depth, _) (scripts/config.pl), exposed so scripts/undo_history.pl's
+// eviction cap has one source of truth instead of a second copy of the number.
 size_t editorUndoDepth(void);
 
 // Selects [anchorPos, cursorPos) as the current match/selection span: sets

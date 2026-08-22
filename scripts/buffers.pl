@@ -1,16 +1,16 @@
 % Buffer-local variables: a generic mechanism for state that should be
-% independent per buffer -- undo/redo history (src/undo_history.pl) and
-% search/replace session state (src/search.pl) are the first users, so
+% independent per buffer -- undo/redo history (scripts/undo_history.pl) and
+% search/replace session state (scripts/search.pl) are the first users, so
 % opening a second file doesn't share (or clobber) the first one's undo
 % stack or in-progress search. `blocal(BufId, Key, Value)` is one fact per
 % (buffer, key), maintained with the same "retract old, assertz new"
-% singleton idiom src/undo_history.pl/src/search.pl already used for their
+% singleton idiom scripts/undo_history.pl/scripts/search.pl already used for their
 % (formerly global) state -- safe to do this per key now that retract/1
 % reclaims its arena bytes (see prolog.c's compactProgram) instead of
 % leaking, which every one of these updates would otherwise do on nearly
 % every keystroke.
 %
-% goal_col_set/1 and goal_col_val/1 (src/movement.pl) deliberately do NOT
+% goal_col_set/1 and goal_col_val/1 (scripts/movement.pl) deliberately do NOT
 % move here: cursor/anchor/scroll are per-*window* now (see main.c's Window
 % struct), not per-buffer, and goal-column tracking is a window's own
 % vertical-movement bookkeeping -- if the same buffer is ever split across

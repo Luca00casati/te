@@ -4,9 +4,9 @@
 % to remember, when to coalesce a run of typing into one undo step, when to
 % evict the oldest entry past te_undo_depth/1, and what undo/redo actually
 % do. te-specific (uses te_* natives), so it doesn't belong in the
-% editor-agnostic src/bootstrap.pl -- consulted from scriptSetup instead.
+% editor-agnostic scripts/bootstrap.pl -- consulted from scriptSetup instead.
 %
-% Each stack is a buffer-local variable (src/buffers.pl's blocal_get/2,
+% Each stack is a buffer-local variable (scripts/buffers.pl's blocal_get/2,
 % blocal_set/2) holding a list of entry(Pos, Removed, Inserted, CurBefore,
 % CurAfter) terms, newest first -- buffer-local rather than a single global
 % fact so each buffer gets its own independent undo history (see

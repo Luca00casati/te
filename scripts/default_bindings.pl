@@ -22,7 +22,7 @@ leader_binding(a, any, te_action('select-all')).
 leader_binding(space, any, te_action('select-line')).
 leader_binding(q, any, te_action('quit')).
 
-% buffers (src/buffers.pl) -- 'n'/'h' stay reserved for the key/commands
+% buffers (scripts/buffers.pl) -- 'n'/'h' stay reserved for the key/commands
 % help overlays (hardcoded in main.c's handlePrefix, checked only after
 % leader_binding/3 finds no match).
 leader_binding(b, any, te_action('switch-buffer')).
@@ -31,7 +31,7 @@ leader_binding(l, any, te_action('list-buffers')).
 leader_binding('.', any, te_action('next-buffer')).
 leader_binding(',', any, te_action('prev-buffer')).
 
-% windows (src/windows.pl) -- numbered to mirror Emacs's C-x 0/1/2/3.
+% windows (scripts/windows.pl) -- numbered to mirror Emacs's C-x 0/1/2/3.
 leader_binding('2', any, te_action('split-below')).
 leader_binding('3', any, te_action('split-right')).
 leader_binding(tab, any, te_action('other-window')).

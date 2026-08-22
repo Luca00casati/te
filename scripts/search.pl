@@ -8,11 +8,11 @@
 % UI plumbing orthogonal to search, so main.c still resolves "what's the
 % active query" (live prompt text vs. last committed search) and passes the
 % bytes in here as an argument, same as it already hands byte ranges to
-% record_edit/5 in src/undo_history.pl.
+% record_edit/5 in scripts/undo_history.pl.
 %
-% Buffer-local variables (src/buffers.pl's blocal_get/2, blocal_set/2) --
+% Buffer-local variables (scripts/buffers.pl's blocal_get/2, blocal_set/2) --
 % each buffer gets its own independent search/replace session state, same
-% as its own undo history (src/undo_history.pl). match_list holds the
+% as its own undo history (scripts/undo_history.pl). match_list holds the
 % current match(Start,End) terms in buffer order; search_index is which one
 % is selected (for "i/N"); search_bad_regex/match_truncated mirror
 % te_find_matches's Result. search_params remembers the session that
@@ -71,7 +71,7 @@ recompute(Query, IsRegex) :-
     ).
 
 % Selects match_list's Index-th entry and records it as the current one.
-% Also clears the goal column (src/movement.pl) -- jumping to a match
+% Also clears the goal column (scripts/movement.pl) -- jumping to a match
 % shouldn't leave a stale up/down goal column from before the jump, the
 % same thing te_set_selection's caller (this predicate) always did back
 % when goal-column state was a C static te_set_selection reset directly.

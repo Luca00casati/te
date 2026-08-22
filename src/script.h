@@ -31,6 +31,23 @@ bool scriptInitFromFile(const char *path);
 
 void scriptShutdown(void);
 
+// --- config (scripts/config.pl) ------------------------------------------
+// One-shot reads of a cfg(Key, Value) fact, for main.c's loadConfig to call
+// a handful of times right after scriptInit/scriptInitFromFile succeeds
+// (before the window opens) -- see script.c's cfgQuery for the graceful-
+// degrade contract: each returns false, leaving `out` untouched, if the key
+// has no cfg/2 fact or the value isn't the requested shape, so the caller
+// can fall back to its own compiled-in default. `key` is a raw Prolog atom
+// name (e.g. "font_size"), not user input -- callers only ever pass a
+// literal.
+bool scriptCfgFloat(const char *key, float *out);
+bool scriptCfgLong(const char *key, long *out);
+bool scriptCfgBool(const char *key, bool *out);
+bool scriptCfgText(const char *key, char *out, size_t outsz);
+// Value is rgb(R, G, B) or rgba(R, G, B, A), 0-255 per channel; `a` is set
+// to 255 when the fact is rgb/3.
+bool scriptCfgColor(const char *key, unsigned char *r, unsigned char *g, unsigned char *b, unsigned char *a);
+
 // Solves key_binding(Key, Mod, Handler) (auto-repeat while held) and, if
 // nothing matched, key_binding_once(Key, Mod, Handler) (fires once per
 // press) fresh against this frame's input -- re-deriving the match every

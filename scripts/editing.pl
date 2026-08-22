@@ -1,11 +1,13 @@
 % Insertion/deletion/clipboard/whole-line editing, in Prolog rather than as
-% static C functions -- the same split as src/movement.pl and src/search.pl:
+% static C functions -- the same split as scripts/movement.pl and scripts/search.pl:
 % the raw buffer work stays native (te_insert/1, te_apply_replace/3 -- both
 % already existed, for typing and search/replace respectively -- plus
-% te_byte_at/2, te_buffer_range/3, te_copy_range/2, te_clipboard_get/1 and
-% te_tab/1, added alongside this file in src/script.c), and this is the
-% decision logic on top: what to insert/delete/copy and where, and how the
-% cursor should land afterward.
+% te_byte_at/2, te_buffer_range/3, te_copy_range/2, te_clipboard_get/1,
+% added alongside this file in src/script.c), and this is the decision
+% logic on top: what to insert/delete/copy and where, and how the cursor
+% should land afterward. `indent` reads its inserted text straight from
+% cfg(tab, _) (scripts/config.pl) -- no native round-trip needed for a
+% plain config value Prolog already has.
 %
 % te_apply_replace always leaves the cursor at the end of what it just
 % spliced in (mirroring ordinary typing). Several ops here want the cursor
@@ -26,7 +28,7 @@ current_line_span(Start, End) :-
     ( Le < Len -> End is Le + 1 ; End = Le ).
 
 newline :- te_insert("\n").
-indent :- te_tab(Tab), te_insert(Tab).
+indent :- cfg(tab, Tab), te_insert(Tab).
 
 % Cursor lands at the start of the new line (te_apply_replace's default: end
 % of what it just inserted, i.e. right after the newline).
