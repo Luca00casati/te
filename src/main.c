@@ -1891,12 +1891,105 @@ size_t editorPageLines(void) { return page_lines; }
 size_t editorBufferLen(void) { return len; }
 int editorCurrentBufferId(void) { return selected_window->buf->id; }
 
-// A window's own id -- today there's only ever root_window (a lone leaf),
-// so this is a trivial lookup; once splitting lands this needs a real tree
-// walk over leaves (a split node has no buffer of its own to switch and no
-// meaningful "select" target).
+// Leaves only -- a split node has no buffer of its own to switch and no
+// meaningful "select" target, so it's never a valid id for te_select_window/
+// te_window_buffer/te_window_set_buffer.
 static Window *windowFindById(int id) {
-    return (root_window && root_window->id == id) ? root_window : NULL;
+    if (!root_window) return NULL;
+    Window *stack[64]; // window-tree depth is bounded by how many times a
+                        // user actually splits; 64 is generously past any
+                        // real UI layout
+    size_t top = 0;
+    stack[top++] = root_window;
+    while (top > 0) {
+        Window *w = stack[--top];
+        if (w->kind == WIN_LEAF) {
+            if (w->id == id) return w;
+        } else {
+            stack[top++] = w->a;
+            stack[top++] = w->b;
+        }
+    }
+    return NULL;
+}
+static void windowCountLeaves(Window *w, size_t *n) {
+    if (w->kind == WIN_LEAF) { (*n)++; return; }
+    windowCountLeaves(w->a, n);
+    windowCountLeaves(w->b, n);
+}
+static void windowFindLeafAt(Window *w, size_t target, size_t *counter, Window **result) {
+    if (*result) return;
+    if (w->kind == WIN_LEAF) {
+        if (*counter == target) *result = w;
+        (*counter)++;
+        return;
+    }
+    windowFindLeafAt(w->a, target, counter, result);
+    windowFindLeafAt(w->b, target, counter, result);
+}
+// The first (reading-order) leaf under `w` -- used to pick a sensible
+// newly-selected window when the one that was selected just got closed and
+// its sibling (promoted into its place) turns out to be a split, not a leaf.
+static Window *windowFirstLeaf(Window *w) {
+    while (w->kind != WIN_LEAF) w = w->a;
+    return w;
+}
+// Inserts a new split node as `target`'s parent, with `target` as one child
+// (unchanged: same id, buffer, cursor, scroll -- splitting never disturbs
+// the window being split) and a fresh leaf on the *same* buffer as the
+// other (real Emacs behavior: split-window shows the same buffer in both
+// panes to start). Returns the new leaf.
+static Window *windowSplit(Window *target, WindowKind kind) {
+    Window *parent = malloc(sizeof(Window));
+    parent->id = next_window_id++;
+    parent->kind = kind;
+    parent->parent = target->parent;
+    parent->buf = NULL;
+    parent->a = target;
+    parent->b = windowCreateLeaf(target->buf);
+    parent->split_ratio = 0.5f;
+    if (target->parent) {
+        if (target->parent->a == target) target->parent->a = parent; else target->parent->b = parent;
+    } else {
+        root_window = parent;
+    }
+    target->parent = parent;
+    parent->b->parent = parent;
+    return parent->b;
+}
+// Closes one leaf, promoting its sibling into the parent split node's place
+// (freeing both `target` and the now-redundant split node -- but never
+// `target`'s buffer; closing a window never kills a buffer, only
+// kill_buffer does). False if `target` is the last window (no parent to
+// collapse into).
+static bool windowClose(Window *target) {
+    if (!target->parent) return false;
+    Window *parent = target->parent;
+    Window *sibling = (parent->a == target) ? parent->b : parent->a;
+    Window *grandparent = parent->parent;
+    sibling->parent = grandparent;
+    if (grandparent) {
+        if (grandparent->a == parent) grandparent->a = sibling; else grandparent->b = sibling;
+    } else {
+        root_window = sibling;
+    }
+    if (selected_window == target) selected_window = windowFirstLeaf(sibling);
+    free(target);
+    free(parent);
+    return true;
+}
+// Frees every node under `w` except `keep` itself -- `keep`'s own ancestor
+// split nodes get freed too (their *other* child's whole subtree first,
+// recursively, then the split node itself), left dangling only from
+// `keep->parent` until the caller (editorWindowDeleteOthers) fixes it up
+// immediately after, before anything else can read it.
+static void windowFreeExcept(Window *w, Window *keep) {
+    if (w == keep) return;
+    if (w->kind != WIN_LEAF) {
+        windowFreeExcept(w->a, keep);
+        windowFreeExcept(w->b, keep);
+    }
+    free(w);
 }
 
 int editorBufferCreate(void) { return bufferCreate()->id; }
@@ -2009,6 +2102,43 @@ bool editorWindowSetBuffer(int win_id, int buf_id) {
     w->win_anchor = 0;
     w->win_top_line = 0;
     w->win_left_col = 0;
+    return true;
+}
+
+// Splits `win_id` (below if `below`, else to its right), on the same
+// buffer it already shows. Returns the new leaf's id, or -1 if `win_id`
+// isn't live.
+int editorWindowSplit(int win_id, bool below) {
+    Window *w = windowFindById(win_id);
+    if (!w) return -1;
+    return windowSplit(w, below ? WIN_SPLIT_BELOW : WIN_SPLIT_RIGHT)->id;
+}
+bool editorWindowClose(int win_id) {
+    Window *w = windowFindById(win_id);
+    return w ? windowClose(w) : false;
+}
+size_t editorWindowCount(void) {
+    size_t n = 0;
+    windowCountLeaves(root_window, &n);
+    return n;
+}
+int editorWindowIdAt(size_t index) { // 0-based, reading order (pre-order over leaves)
+    size_t counter = 0;
+    Window *result = NULL;
+    windowFindLeafAt(root_window, index, &counter, &result);
+    return result ? result->id : -1;
+}
+// Collapses the whole tree to just `win_id` (a no-op if it's already the
+// only window). The buffers every other window was showing are untouched
+// -- closing/discarding a window never kills a buffer.
+bool editorWindowDeleteOthers(int win_id) {
+    Window *keep = windowFindById(win_id);
+    if (!keep) return false;
+    if (keep == root_window) return true;
+    windowFreeExcept(root_window, keep);
+    keep->parent = NULL;
+    root_window = keep;
+    selected_window = keep;
     return true;
 }
 

@@ -486,6 +486,43 @@ static bool nTeWindowSetBuffer(Prolog *p, PlTerm *args[], int arity, void *ctx) 
     if (!prologGetInt(p, args[0], &winId) || !prologGetInt(p, args[1], &bufId)) return false;
     return editorWindowSetBuffer((int)winId, (int)bufId);
 }
+// Dir is the atom `right` or `below`; anything else fails rather than
+// silently defaulting, so a typo in src/windows.pl surfaces immediately.
+static bool nTeWindowSplit(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long winId;
+    if (!prologGetInt(p, args[0], &winId)) return false;
+    const char *dir = prologFunctorName(p, args[1]);
+    bool below;
+    if (dir && strcmp(dir, "below") == 0) below = true;
+    else if (dir && strcmp(dir, "right") == 0) below = false;
+    else return false;
+    int newId = editorWindowSplit((int)winId, below);
+    if (newId < 0) return false;
+    return prologUnify(p, args[2], prologMkInt(p, (long)newId));
+}
+static bool nTeWindowClose(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    return editorWindowClose((int)id);
+}
+static bool nTeWindowList(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t count = editorWindowCount();
+    PlTerm *list = prologMkAtom(p, "[]");
+    for (size_t i = count; i > 0; i--) {
+        PlTerm *cargs[2] = { prologMkInt(p, (long)editorWindowIdAt(i - 1)), list };
+        list = prologMkCompound(p, ".", 2, cargs);
+    }
+    return prologUnify(p, args[0], list);
+}
+static bool nTeWindowDeleteOthers(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    long id;
+    if (!prologGetInt(p, args[0], &id)) return false;
+    return editorWindowDeleteOthers((int)id);
+}
 
 // --- lifecycle --------------------------------------------------------
 
@@ -592,6 +629,10 @@ static bool scriptSetup(void) {
     prologRegisterNative(pl, "te_select_window", 1, nTeSelectWindow, NULL);
     prologRegisterNative(pl, "te_window_buffer", 2, nTeWindowBuffer, NULL);
     prologRegisterNative(pl, "te_window_set_buffer", 2, nTeWindowSetBuffer, NULL);
+    prologRegisterNative(pl, "te_window_split", 3, nTeWindowSplit, NULL);
+    prologRegisterNative(pl, "te_window_close", 1, nTeWindowClose, NULL);
+    prologRegisterNative(pl, "te_window_list", 1, nTeWindowList, NULL);
+    prologRegisterNative(pl, "te_window_delete_others", 1, nTeWindowDeleteOthers, NULL);
 
     if (!resolvePlDir(plDir, sizeof plDir)) return false;
     char bootstrapPath[4160];

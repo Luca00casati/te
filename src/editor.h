@@ -166,12 +166,22 @@ bool editorBufferDirty(int id, bool *out);
 bool editorBufferSave(int id);
 
 // --- windows (src/windows.pl) -----------------------------------------------
-// Only the addressing surface switch_buffer/1 needs exists yet (there's
-// only ever one window, root_window, until a later commit adds real
-// splitting) -- split/close/list/delete-others land alongside that.
 int editorSelectedWindowId(void);
 bool editorSelectWindow(int id);
 int editorWindowBufferId(int win_id);
 bool editorWindowSetBuffer(int win_id, int buf_id);
+
+// Splits `win_id` (below if `below`, else to its right) on the same buffer
+// it already shows (real Emacs behavior for split-window-right/-below).
+// Returns the new leaf's id, or -1 if `win_id` isn't live.
+int editorWindowSplit(int win_id, bool below);
+// Closes one leaf, promoting its sibling into the parent's place -- never
+// touches the buffer it was showing. False if `win_id` is the last window.
+bool editorWindowClose(int win_id);
+size_t editorWindowCount(void);
+int editorWindowIdAt(size_t index); // 0-based, reading order; -1 out of range
+// Collapses the whole tree to just `win_id` (a no-op if already the only
+// window). The buffers every other window showed are untouched.
+bool editorWindowDeleteOthers(int win_id);
 
 #endif // TE_EDITOR_H

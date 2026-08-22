@@ -565,6 +565,56 @@ static void test_buffer_open_file_and_find_by_path(void) {
     unlink(path);
 }
 
+// --- window tree (main.c's Window struct) ---------------------------------
+static void test_window_split_close(void) {
+    int origWin = editorSelectedWindowId();
+    int origBuf = editorCurrentBufferId();
+    CHECK(editorWindowCount() == 1);
+
+    int newWin = editorWindowSplit(origWin, /*below=*/false);
+    CHECK(newWin != -1 && newWin != origWin);
+    CHECK(editorWindowCount() == 2);
+    CHECK(editorWindowBufferId(newWin) == origBuf); // same buffer in both panes to start
+    CHECK(editorSelectedWindowId() == origWin); // splitting doesn't change the selection
+
+    CHECK(editorWindowClose(newWin));
+    CHECK(editorWindowCount() == 1);
+    CHECK(editorSelectedWindowId() == origWin);
+    CHECK(!editorWindowClose(origWin)); // can't close the last window
+}
+
+// Each leaf owns its own cursor/scroll -- splitting a buffer into two panes
+// must not make them share point (real Emacs semantics: point is per-
+// window, only the buffer's content is shared).
+static void test_window_split_independent_view(void) {
+    setText("hello world");
+    int win1 = editorSelectedWindowId();
+    int buf1 = editorCurrentBufferId();
+    cursor = 5;
+
+    int win2 = editorWindowSplit(win1, true);
+    CHECK(editorWindowBufferId(win2) == buf1);
+    CHECK(editorSelectWindow(win2));
+    CHECK(cursor == 0); // a freshly split pane starts at its own zeroed view state
+    cursor = 3;
+    CHECK(editorSelectWindow(win1));
+    CHECK(cursor == 5); // win1's cursor is untouched by anything done to win2's
+
+    CHECK(editorWindowClose(win2));
+}
+
+static void test_window_delete_others(void) {
+    int win1 = editorSelectedWindowId();
+    int win2 = editorWindowSplit(win1, false);
+    int win3 = editorWindowSplit(win2, true);
+    CHECK(editorWindowCount() == 3);
+
+    CHECK(editorWindowDeleteOthers(win3));
+    CHECK(editorWindowCount() == 1);
+    CHECK(editorSelectedWindowId() == win3);
+    CHECK(editorWindowBufferId(win3) != -1); // win3's own buffer survives, untouched
+}
+
 // --- Prolog scripting (src/script.c) -------------------------------------
 static void test_script_loads_and_runs_api(void) {
     reset();
@@ -670,6 +720,10 @@ int main(void) {
     RUN(test_buffer_isolation);
     RUN(test_buffer_properties);
     RUN(test_buffer_open_file_and_find_by_path);
+
+    RUN(test_window_split_close);
+    RUN(test_window_split_independent_view);
+    RUN(test_window_delete_others);
 
     scriptShutdown(); // the script-specific tests below set up their own engine each
     RUN(test_script_loads_and_runs_api);
