@@ -34,6 +34,7 @@
 
 #include "platform.h"
 #include "binding.h"
+#include "config.h"
 #include "editor.h"
 #include "prolog.h"
 
@@ -326,6 +327,50 @@ static bool nTeBufferLen(Prolog *p, PlTerm *args[], int arity, void *ctx) {
     return prologUnify(p, args[0], prologMkInt(p, (long)editorBufferLen()));
 }
 
+// --- editing (src/editing.pl) ----------------------------------------------
+
+static bool nTeTab(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    return prologUnify(p, args[0], prologMkCodeList(p, CFG_TAB, strlen(CFG_TAB)));
+}
+// The byte at `pos`, 0-255 -- fails if pos is out of range, so callers like
+// move_line_left can write a single `te_byte_at(Ls, B), ... -> ...` guard
+// instead of a separate bounds check.
+static bool nTeByteAt(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t pos;
+    if (!getPos(p, args[0], &pos)) return false;
+    size_t n;
+    const unsigned char *s = editorGetText(&n);
+    if (pos >= n) return false;
+    return prologUnify(p, args[1], prologMkInt(p, (long)s[pos]));
+}
+// text[start,end) as a code list -- for swap_line's line-sized reads. Unlike
+// te_copy_range, this materializes the bytes as a Prolog list, so it's only
+// used where the range is bounded by a single line, never a whole selection.
+static bool nTeBufferRange(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t start, end;
+    if (!getPos(p, args[0], &start) || !getPos(p, args[1], &end) || end < start) return false;
+    size_t n;
+    const unsigned char *s = editorGetText(&n);
+    if (end > n) return false;
+    return prologUnify(p, args[2], prologMkCodeList(p, (const char *)s + start, end - start));
+}
+// Current clipboard content as a code list ('[]' if empty).
+static bool nTeClipboardGet(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    const char *s = platformGetClipboardText();
+    return prologUnify(p, args[0], prologMkCodeList(p, s, strlen(s)));
+}
+static bool nTeCopyRange(Prolog *p, PlTerm *args[], int arity, void *ctx) {
+    (void)arity; (void)ctx;
+    size_t start, end;
+    if (!getPos(p, args[0], &start) || !getPos(p, args[1], &end)) return false;
+    editorCopyRange(start, end);
+    return true;
+}
+
 // --- lifecycle --------------------------------------------------------
 
 static char plDir[4096];
@@ -412,6 +457,11 @@ static bool scriptSetup(void) {
     prologRegisterNative(pl, "te_view_cols", 1, nTeViewCols, NULL);
     prologRegisterNative(pl, "te_page_lines", 1, nTePageLines, NULL);
     prologRegisterNative(pl, "te_buffer_len", 1, nTeBufferLen, NULL);
+    prologRegisterNative(pl, "te_tab", 1, nTeTab, NULL);
+    prologRegisterNative(pl, "te_byte_at", 2, nTeByteAt, NULL);
+    prologRegisterNative(pl, "te_buffer_range", 3, nTeBufferRange, NULL);
+    prologRegisterNative(pl, "te_clipboard_get", 1, nTeClipboardGet, NULL);
+    prologRegisterNative(pl, "te_copy_range", 2, nTeCopyRange, NULL);
 
     if (!resolvePlDir(plDir, sizeof plDir)) return false;
     char bootstrapPath[4160];
@@ -895,3 +945,22 @@ void scriptPageDown(bool wrap, size_t cols, size_t lines) {
     prologSolve(pl, prologMkCompound(pl, "page_down", 3, cargs));
     prologReset(pl, mark);
 }
+
+// --- editing (src/editing.pl) -----------------------------------------------
+void scriptNewline(void) { solveAtom("newline"); }
+void scriptOpenLineBelow(void) { solveAtom("open_line_below"); }
+void scriptOpenLineAbove(void) { solveAtom("open_line_above"); }
+void scriptIndent(void) { solveAtom("indent"); }
+void scriptDeleteBack(void) { solveAtom("delete_back"); }
+void scriptDeleteForward(void) { solveAtom("delete_forward"); }
+void scriptCopy(void) { solveAtom("copy_selection"); }
+void scriptCut(void) { solveAtom("cut_selection"); }
+void scriptPaste(void) { solveAtom("paste_clipboard"); }
+void scriptMoveLineLeft(void) { solveAtom("move_line_left"); }
+void scriptMoveLineRight(void) { solveAtom("move_line_right"); }
+void scriptMoveLineUp(void) { solveAtom("move_line_up"); }
+void scriptMoveLineDown(void) { solveAtom("move_line_down"); }
+void scriptCutLine(void) { solveAtom("cut_line"); }
+void scriptCopyLine(void) { solveAtom("copy_line"); }
+void scriptPasteLine(void) { solveAtom("paste_line"); }
+void scriptSelectLine(void) { solveAtom("select_line"); }

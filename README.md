@@ -322,6 +322,19 @@ Two suites, both under `tests/`:
   top — which direction, how far, and the sticky goal column a run of
   up/down presses tries to keep (`goal_col_set`/`goal_col_val` facts, replacing
   the old C statics of the same name).
+- `src/editing.pl` — insertion/deletion/clipboard/whole-line editing: newline/
+  open-line-above-or-below/indent, delete back/forward (collapsing a
+  selection instead when there is one), copy/cut/paste, and the whole-line
+  ops (shift-line indent/outdent, swap line up/down, cut/copy/paste-line,
+  select-line). The actual splice stays native (`te_insert/1`, the same
+  primitive typing uses; `te_apply_replace/3`, shared with search/replace's
+  undo-recording edits), alongside a handful of small raw-buffer primitives
+  added for this file (`te_byte_at/2`, `te_buffer_range/3`, `te_copy_range/2`
+  straight to the clipboard, `te_clipboard_get/1`, `te_tab/1` for
+  `CFG_TAB`); this is the decision logic on top, including restoring the
+  cursor to where it belongs when that differs from `te_apply_replace`'s own
+  default (the end of what it just spliced in) — e.g. `open-line-above`
+  landing on the new blank line rather than after the newline it inserted.
 - The `Makefile` compiles `src/main.c`, `src/glyphs.c`, `src/platform.c`,
   `src/script.c`, and `src/prolog.c` as C11 and links against GLFW3, OpenGL,
   libpcre2-8, FreeType2, and libpng (found via pkg-config; the Prolog engine

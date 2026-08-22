@@ -195,4 +195,34 @@ void scriptMoveVertical(int delta, bool wrap, size_t cols);
 void scriptPageUp(bool wrap, size_t cols, size_t lines);
 void scriptPageDown(bool wrap, size_t cols, size_t lines);
 
+// --- editing (src/editing.pl) ----------------------------------------------
+// Insertion/deletion/clipboard/whole-line operations, the same "raw buffer
+// primitive stays native, decision logic is Prolog" split as movement and
+// search/replace: the actual splice is te_insert/1 (existing) or
+// te_apply_replace/3 (existing, undo-recording), the single-byte/substring
+// reads are te_byte_at/2 and te_buffer_range/3, and copying a (possibly
+// buffer-sized) range straight to the clipboard is te_copy_range/2 -- all
+// native, added in script.c alongside src/editing.pl. main.c's applyAction
+// calls these instead of the old static deleteBack/copySelection/swapLine/
+// pasteLine/pasteClipboard/etc., keeping its switch statement's shape
+// unchanged.
+
+void scriptNewline(void);
+void scriptOpenLineBelow(void);
+void scriptOpenLineAbove(void);
+void scriptIndent(void);
+void scriptDeleteBack(void);
+void scriptDeleteForward(void);
+void scriptCopy(void);
+void scriptCut(void);
+void scriptPaste(void);
+void scriptMoveLineLeft(void);
+void scriptMoveLineRight(void);
+void scriptMoveLineUp(void);
+void scriptMoveLineDown(void);
+void scriptCutLine(void);
+void scriptCopyLine(void);
+void scriptPasteLine(void);
+void scriptSelectLine(void);
+
 #endif // TE_SCRIPT_H

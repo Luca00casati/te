@@ -61,6 +61,12 @@ void editorSetSelection(size_t anchor_pos, size_t cursor_pos);
 // ordinary typing does. Distinct from editorReplaceRange, which is
 // undo-free and reserved for undo_step/redo_step themselves.
 void editorApplyReplace(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
+// Copies text[start,end) to the system clipboard, no-op if end <= start --
+// mirrors the old static copyRange exactly. Kept native (rather than routing
+// a substring through Prolog as a code list, the way src/editing.pl's
+// swap_line does for single-line-sized reads) since a selection can span the
+// whole buffer (e.g. select-all then copy).
+void editorCopyRange(size_t start, size_t end);
 
 // --- search (src/search.pl) -------------------------------------------------
 // PCRE2 (regex) and memmem (literal) are C-only, so the actual pattern

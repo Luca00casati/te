@@ -132,11 +132,15 @@ static void test_insert_replaces_selection(void) {
     CHECK(anchor == 2);
 }
 
+// deleteBack/deleteForward/deleteSelection's logic moved into src/editing.pl
+// (delete_back/delete_forward, both routing through delete_selection when
+// there's a selection) -- exercise it through runAction, same as
+// test_word_movement below does for movement.pl.
 static void test_deleteBack_ascii(void) {
     setText("abc");
     cursor = 3;
     anchor = 3;
-    deleteBack();
+    runAction(ACTION_DELETE_BACK);
     CHECK(textEquals("ab"));
     CHECK(cursor == 2);
 }
@@ -152,7 +156,7 @@ static void test_deleteBack_utf8(void) {
     len = 2 + n;
     cursor = 1 + n; // just after the accented char, before 'b'
     anchor = cursor;
-    deleteBack();
+    runAction(ACTION_DELETE_BACK);
     CHECK(textEquals("ab")); // the whole 2-byte sequence goes, not just its tail byte
     CHECK(cursor == 1);
 }
@@ -161,7 +165,7 @@ static void test_deleteForward_ascii(void) {
     setText("abc");
     cursor = 0;
     anchor = 0;
-    deleteForward();
+    runAction(ACTION_DELETE_FORWARD);
     CHECK(textEquals("bc"));
     CHECK(cursor == 0);
 }
@@ -170,9 +174,30 @@ static void test_deleteSelection(void) {
     setText("abcdef");
     anchor = 1;
     cursor = 4; // "bcd"
-    deleteSelection();
+    runAction(ACTION_DELETE_BACK); // hasSel routes to delete_selection regardless of direction
     CHECK(textEquals("aef"));
     CHECK(cursor == 1);
+}
+
+// open_line_below/open_line_above (src/editing.pl): both insert a single
+// newline, but land the cursor differently -- below, after it (on the new
+// blank line, same as te_apply_replace's own default); above, an explicit
+// te_set_cursor override puts it *before* the newline, onto the fresh blank
+// line above instead.
+static void test_openLineBelowAbove(void) {
+    setText("abc\ndef");
+    cursor = 1;
+    anchor = 1; // inside "abc"
+    runAction(ACTION_OPEN_LINE_BELOW);
+    CHECK(textEquals("abc\n\ndef"));
+    CHECK(cursor == 4);
+
+    setText("abc\ndef");
+    cursor = 1;
+    anchor = 1;
+    runAction(ACTION_OPEN_LINE_ABOVE);
+    CHECK(textEquals("\nabc\ndef"));
+    CHECK(cursor == 0);
 }
 
 // --- undo / redo -------------------------------------------------------
@@ -240,14 +265,17 @@ static void test_line_boundaries(void) {
     CHECK(lineStartOfRow(2) == 8);
 }
 
-static void test_currentLineSpan(void) {
+// currentLineSpan's logic moved into src/editing.pl (current_line_span,
+// used by select_line/cut_line/copy_line) -- exercise it through
+// ACTION_SELECT_LINE, which sets anchor/cursor to exactly that span.
+static void test_selectLine(void) {
     setText("abc\ndef\nghi");
     cursor = 5; // inside "def"
-    Span s = currentLineSpan();
-    CHECK(s.start == 4 && s.end == 8); // includes the trailing newline
+    runAction(ACTION_SELECT_LINE);
+    CHECK(anchor == 4 && cursor == 8); // includes the trailing newline
     cursor = 9; // inside the last line, no trailing newline
-    s = currentLineSpan();
-    CHECK(s.start == 8 && s.end == 11);
+    runAction(ACTION_SELECT_LINE);
+    CHECK(anchor == 8 && cursor == 11);
 }
 
 static void test_cursorLineCol(void) {
@@ -257,14 +285,39 @@ static void test_cursorLineCol(void) {
     CHECK(lc.line == 1 && lc.col == 1);
 }
 
+// swapLine's logic moved into src/editing.pl (swap_line_down/swap_line_up,
+// via move_line_down/move_line_up) -- exercise it through runAction.
 static void test_swapLine_down_and_up(void) {
     setText("one\ntwo\nthree");
     cursor = 1; // inside "one"
     anchor = 1;
-    swapLine(true); // swap with "two"
+    runAction(ACTION_MOVE_LINE_DOWN); // swap with "two"
     CHECK(textEquals("two\none\nthree"));
-    swapLine(false); // swap back
+    runAction(ACTION_MOVE_LINE_UP); // swap back
     CHECK(textEquals("one\ntwo\nthree"));
+}
+
+// move_line_left/move_line_right (src/editing.pl): outdent removes one
+// leading space/tab (a no-op if the line doesn't start with one), indent
+// always adds one leading space; both keep the cursor's position relative
+// to the rest of the line rather than te_apply_replace's own default.
+static void test_moveLineLeftRight(void) {
+    setText("  abc");
+    cursor = 4;
+    anchor = 4;
+    runAction(ACTION_MOVE_LINE_LEFT);
+    CHECK(textEquals(" abc"));
+    CHECK(cursor == 3);
+    runAction(ACTION_MOVE_LINE_RIGHT);
+    CHECK(textEquals("  abc"));
+    CHECK(cursor == 4);
+
+    setText("abc"); // no leading space/tab: outdent is a no-op
+    cursor = 1;
+    anchor = 1;
+    runAction(ACTION_MOVE_LINE_LEFT);
+    CHECK(textEquals("abc"));
+    CHECK(cursor == 1);
 }
 
 // --- word movement -----------------------------------------------------
@@ -483,6 +536,7 @@ int main(void) {
     RUN(test_deleteBack_utf8);
     RUN(test_deleteForward_ascii);
     RUN(test_deleteSelection);
+    RUN(test_openLineBelowAbove);
 
     RUN(test_undo_redo_roundtrip);
     RUN(test_undo_coalesces_single_char_typing);
@@ -490,9 +544,10 @@ int main(void) {
     RUN(test_undo_multistep);
 
     RUN(test_line_boundaries);
-    RUN(test_currentLineSpan);
+    RUN(test_selectLine);
     RUN(test_cursorLineCol);
     RUN(test_swapLine_down_and_up);
+    RUN(test_moveLineLeftRight);
 
     RUN(test_word_movement);
     RUN(test_moveLeft_moveRight_utf8);

@@ -24,7 +24,6 @@
 // --- small value types -------------------------------------------------
 typedef struct { size_t line, col; } LineCol;
 typedef struct { uint32_t cp; size_t len; } Cp;
-typedef struct { size_t start, end; } Span;
 typedef struct { float char_w, line_h, text_x0; size_t visible, visible_cols; } Metrics;
 
 typedef enum { MB_NONE, MB_TEXT_PROMPT, MB_CHAR_QUERY, MB_REPLACE_QUERY } MbKind;
@@ -157,9 +156,6 @@ static void echo(const char *msg);
 static void echoFmt(const char *fmt, ...);
 static void edit(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len);
 static void insertBytes(const unsigned char *bytes, size_t n);
-static void deleteSelection(void);
-static void deleteBack(void);
-static void deleteForward(void);
 static void doUndo(void);
 static void doRedo(void);
 static void freeHistory(void);
@@ -175,11 +171,6 @@ static size_t cpCells(uint32_t cp);
 static size_t colsIn(size_t a, size_t b);
 static size_t byteAtCol(size_t start, size_t stop, size_t col);
 static void copyRange(size_t a, size_t b);
-static void copySelection(void);
-static Span currentLineSpan(void);
-static void swapLine(bool down);
-static void pasteLine(void);
-static void pasteClipboard(void);
 static void setFilename(const char *path, size_t path_len);
 static bool readFileInto(const char *path);
 static void openPath(const char *path);
@@ -273,30 +264,6 @@ static void insertBytes(const unsigned char *bytes, size_t n) {
     if (hasSel()) edit(selMin(), selMax(), bytes, n);
     else edit(cursor, cursor, bytes, n);
 }
-static void deleteSelection(void) {
-    if (hasSel()) edit(selMin(), selMax(), NULL, 0);
-}
-static void deleteBack(void) {
-    if (hasSel()) {
-        deleteSelection();
-        return;
-    }
-    if (cursor == 0) return;
-    size_t start = cursor - 1;
-    while (start > 0 && isCont(text[start])) start--;
-    edit(start, cursor, NULL, 0);
-}
-static void deleteForward(void) {
-    if (hasSel()) {
-        deleteSelection();
-        return;
-    }
-    if (cursor >= len) return;
-    size_t end = cursor + 1;
-    while (end < len && isCont(text[end])) end++;
-    edit(cursor, end, NULL, 0);
-}
-
 // --- undo / redo -----------------------------------------------------------
 // The history (coalescing, eviction, what undo/redo actually restore) lives
 // in src/undo_history.pl now; these just keep the cursor/dirty/echo
@@ -579,80 +546,6 @@ static void copyRange(size_t a, size_t b) {
     platformSetClipboardText(buf);
     free(buf);
 }
-static void copySelection(void) {
-    if (hasSel()) copyRange(selMin(), selMax());
-}
-
-// --- whole-line operations -------------------------------------------------
-// Byte range of the current line including its trailing newline (if any).
-static Span currentLineSpan(void) {
-    size_t ls = lineStart(cursor);
-    size_t le = lineEnd(cursor);
-    Span s = { ls, le < len ? le + 1 : le };
-    return s;
-}
-// Swap the current line with an adjacent one. `down` picks the line below,
-// else above. The cursor rides along, keeping its column.
-static void swapLine(bool down) {
-    size_t ls = lineStart(cursor);
-    size_t le = lineEnd(cursor);
-    size_t col = cursor - ls;
-    if (down) {
-        if (le >= len) return; // last line: nothing below
-        size_t ns = le + 1;
-        size_t ne = lineEnd(ns);
-        size_t a = le - ls; // current line length
-        size_t b = ne - ns; // next line length
-        unsigned char *buf = malloc(ne - ls);
-        if (!buf) return;
-        memcpy(buf, text + ns, b);
-        buf[b] = '\n';
-        memcpy(buf + b + 1, text + ls, a);
-        edit(ls, ne, buf, ne - ls);
-        free(buf);
-        cursor = ls + b + 1 + (col < a ? col : a);
-    } else {
-        if (ls == 0) return; // first line: nothing above
-        size_t ps = lineStart(ls - 1);
-        size_t pe = ls - 1; // previous line end (the newline before us)
-        size_t a = pe - ps; // previous line length
-        size_t b = le - ls; // current line length
-        unsigned char *buf = malloc(le - ps);
-        if (!buf) return;
-        memcpy(buf, text + ls, b);
-        buf[b] = '\n';
-        memcpy(buf + b + 1, text + ps, a);
-        edit(ps, le, buf, le - ps);
-        free(buf);
-        cursor = ps + (col < b ? col : b);
-    }
-    anchor = cursor;
-}
-// Paste the clipboard as whole line(s) above the current line.
-static void pasteLine(void) {
-    const char *c = platformGetClipboardText();
-    if (c == NULL) return;
-    size_t slen = strlen(c);
-    if (slen == 0) return;
-    size_t ls = lineStart(cursor);
-    if (c[slen - 1] == '\n') {
-        edit(ls, ls, (const unsigned char *)c, slen);
-    } else {
-        unsigned char *buf = malloc(slen + 1);
-        if (!buf) return;
-        memcpy(buf, c, slen);
-        buf[slen] = '\n';
-        edit(ls, ls, buf, slen + 1);
-        free(buf);
-    }
-}
-static void pasteClipboard(void) {
-    const char *c = platformGetClipboardText();
-    if (c == NULL) return;
-    size_t slen = strlen(c);
-    if (slen > 0) insertBytes((const unsigned char *)c, slen);
-}
-
 // --- file I/O --------------------------------------------------------------
 static void setFilename(const char *path, size_t path_len) {
     size_t m = path_len < sizeof(filename_buf) - 1 ? path_len : sizeof(filename_buf) - 1;
@@ -1150,26 +1043,12 @@ static void applyAction(Action action) {
     // message (e.g. wrap on/off) or open a prompt run below and override this.
     echo(ACTION_LABELS[action]);
     switch (action) {
-        case ACTION_NEWLINE:
-            insertBytes((const unsigned char *)"\n", 1);
-            break;
-        case ACTION_OPEN_LINE_BELOW: {
-            size_t pos = lineEnd(cursor);
-            edit(pos, pos, (const unsigned char *)"\n", 1); // cursor lands at the start of the new line
-            break;
-        }
-        case ACTION_OPEN_LINE_ABOVE: {
-            size_t ls = lineStart(cursor);
-            edit(ls, ls, (const unsigned char *)"\n", 1);
-            cursor = ls; // move onto the fresh blank line above
-            anchor = ls;
-            break;
-        }
-        case ACTION_INDENT:
-            insertBytes((const unsigned char *)CFG_TAB, strlen(CFG_TAB));
-            break;
-        case ACTION_DELETE_BACK: deleteBack(); break;
-        case ACTION_DELETE_FORWARD: deleteForward(); break;
+        case ACTION_NEWLINE: scriptNewline(); break;
+        case ACTION_OPEN_LINE_BELOW: scriptOpenLineBelow(); break;
+        case ACTION_OPEN_LINE_ABOVE: scriptOpenLineAbove(); break;
+        case ACTION_INDENT: scriptIndent(); break;
+        case ACTION_DELETE_BACK: scriptDeleteBack(); break;
+        case ACTION_DELETE_FORWARD: scriptDeleteForward(); break;
         case ACTION_MOVE_LEFT: scriptMoveLeft(); afterMove(); break;
         case ACTION_MOVE_RIGHT: scriptMoveRight(); afterMove(); break;
         case ACTION_MOVE_UP: scriptMoveVertical(-1, wrap, view_cols); afterMove(); break;
@@ -1189,51 +1068,17 @@ static void applyAction(Action action) {
             break;
         case ACTION_UNDO: doUndo(); break;
         case ACTION_REDO: doRedo(); break;
-        case ACTION_COPY: copySelection(); break;
-        case ACTION_CUT:
-            copySelection();
-            deleteSelection();
-            break;
-        case ACTION_PASTE: pasteClipboard(); break;
-        case ACTION_MOVE_LINE_LEFT: {
-            size_t ls = lineStart(cursor);
-            if (ls < len && (text[ls] == ' ' || text[ls] == '\t')) {
-                size_t c = cursor;
-                edit(ls, ls + 1, NULL, 0);
-                cursor = c > ls ? c - 1 : ls;
-                anchor = cursor;
-            }
-            break;
-        }
-        case ACTION_MOVE_LINE_RIGHT: {
-            size_t ls = lineStart(cursor);
-            size_t c = cursor;
-            edit(ls, ls, (const unsigned char *)" ", 1);
-            cursor = c + 1;
-            anchor = cursor;
-            break;
-        }
-        case ACTION_MOVE_LINE_UP: swapLine(false); break;
-        case ACTION_MOVE_LINE_DOWN: swapLine(true); break;
-        case ACTION_CUT_LINE: {
-            Span s = currentLineSpan();
-            copyRange(s.start, s.end);
-            edit(s.start, s.end, NULL, 0);
-            break;
-        }
-        case ACTION_COPY_LINE: {
-            Span s = currentLineSpan();
-            copyRange(s.start, s.end);
-            break;
-        }
-        case ACTION_PASTE_LINE: pasteLine(); break;
-        case ACTION_SELECT_LINE: {
-            Span s = currentLineSpan();
-            anchor = s.start;
-            cursor = s.end;
-            noteActivity();
-            break;
-        }
+        case ACTION_COPY: scriptCopy(); break;
+        case ACTION_CUT: scriptCut(); break;
+        case ACTION_PASTE: scriptPaste(); break;
+        case ACTION_MOVE_LINE_LEFT: scriptMoveLineLeft(); break;
+        case ACTION_MOVE_LINE_RIGHT: scriptMoveLineRight(); break;
+        case ACTION_MOVE_LINE_UP: scriptMoveLineUp(); break;
+        case ACTION_MOVE_LINE_DOWN: scriptMoveLineDown(); break;
+        case ACTION_CUT_LINE: scriptCutLine(); break;
+        case ACTION_COPY_LINE: scriptCopyLine(); break;
+        case ACTION_PASTE_LINE: scriptPasteLine(); break;
+        case ACTION_SELECT_LINE: scriptSelectLine(); break;
         case ACTION_SAVE:
             if (has_file) saveCurrent();
             else mbStartPrompt(MBI_WRITE_FILE, "Write file: ", (const unsigned char *)filename, strlen(filename));
@@ -1897,6 +1742,7 @@ void editorSetSelection(size_t anchor_pos, size_t cursor_pos) {
 void editorApplyReplace(size_t start, size_t end, const unsigned char *bytes, size_t bytes_len) {
     edit(start, end, bytes, bytes_len);
 }
+void editorCopyRange(size_t start, size_t end) { copyRange(start, end); }
 bool editorFindMatches(const unsigned char *query, size_t query_len, bool is_regex) {
     return findMatches(query, query_len, is_regex);
 }
