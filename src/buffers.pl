@@ -69,3 +69,40 @@ default_blocal(search_bad_regex, false).
 default_blocal(match_truncated, false).
 default_blocal(search_params, params(false, false, 0)).
 default_blocal(replace_params, params([], [], false, false)).
+
+% --- policy on top of the native buffer/window primitives -------------------
+% Structural work (create/free a Buffer, keep every Window's `buf` pointer
+% valid) stays native (script.c); this is the decision logic -- reuse an
+% already-open buffer instead of re-reading the file, cycle order, and
+% cleaning up a killed buffer's own blocal/3 facts so they don't linger
+% forever across a long session of opening and closing files.
+
+switch_buffer(Id) :- te_selected_window(W), te_window_set_buffer(W, Id).
+
+% Reuses the buffer already showing Path instead of re-reading it from disk
+% -- a real behavior change from the old single-buffer ACTION_OPEN, which
+% always clobbered the current buffer in place (see README). Opening the
+% same file twice no longer discards unsaved changes in the first buffer.
+open_file(Path) :-
+    ( te_buffer_find_by_path(Path, Id) -> true ; te_buffer_open_file(Path, Id) ),
+    switch_buffer(Id).
+
+next_buffer :- te_buffer_list(Ids), te_current_buffer(Cur), cycle_buffer(Ids, Cur, 1).
+prev_buffer :- te_buffer_list(Ids), te_current_buffer(Cur), cycle_buffer(Ids, Cur, -1).
+% Finds Cur's own position in Ids (nth0 with an unbound index backtracks
+% through the list until Cur unifies -- see bootstrap.pl), then switches to
+% the buffer Delta positions away, wrapping around either end. With a single
+% buffer this always lands back on itself.
+cycle_buffer(Ids, Cur, Delta) :-
+    nth0(Idx, Ids, Cur), !,
+    length(Ids, Len),
+    NewIdx is (Idx + Delta + Len) mod Len,
+    nth0(NewIdx, Ids, NewId),
+    switch_buffer(NewId).
+
+% Clears the killed buffer's own buffer-local state first -- otherwise every
+% key this buffer ever used (undo_stack, search_params, ...) leaks forever
+% as blocal/3 facts nothing can reach again (a real leak the arena
+% compaction fix, prolog.c's compactProgram, can't help with: those facts
+% are still *live*, just permanently unreachable via te_current_buffer).
+kill_buffer(Id) :- retractall(blocal(Id, _, _)), te_buffer_kill(Id).
